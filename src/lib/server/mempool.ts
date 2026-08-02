@@ -116,6 +116,22 @@ export async function getTx(txid: string): Promise<Tx> {
   return getJson<Tx>(`/api/tx/${txid}`);
 }
 
+/** Raw transaction hex — needed as `nonWitnessUtxo` when signing legacy inputs. */
+export async function getTxHex(txid: string): Promise<string> {
+  return getText(`/api/tx/${txid}/hex`);
+}
+
+export interface Utxo {
+  txid: string;
+  vout: number;
+  value: number;
+  status: { confirmed: boolean };
+}
+
+export async function scriptUtxos(scriptPubKeyHex: string): Promise<Utxo[]> {
+  return getJson<Utxo[]>(`/api/scripthash/${scriptHash(scriptPubKeyHex)}/utxo`);
+}
+
 /** Most recent txs touching a scriptPubKey (confirmed + mempool, up to ~50). */
 export async function scriptTxs(scriptPubKeyHex: string): Promise<Tx[]> {
   return getJson<Tx[]>(`/api/scripthash/${scriptHash(scriptPubKeyHex)}/txs`);
