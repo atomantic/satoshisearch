@@ -67,6 +67,9 @@ make -C native/grinder                    # both binaries
 JSON-line events on stdout (`progress` / `found` / `exhausted` / `cancelled`). Node wraps this via
 `src/lib/server/grinder/kangaroo-backends.ts` and the Grinder UI.
 
+For **CUDA / remote GPU** (JeanLucPons, SSH runner, JSONL external backends), see
+[`docs/KANGAROO-GPU.md`](../../docs/KANGAROO-GPU.md).
+
 ## Expected speed
 
 Rough order of magnitude on a modern multi-core Mac (Apple Silicon):

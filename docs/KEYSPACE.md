@@ -30,57 +30,25 @@ Exposed puzzles ship with a stored pubkey (`target.pubkey`). Searching them by w
 integers and hashing is the sealed-path algorithm — for exposed keys the right tool is **interval
 ECDLP** (Pollard's kangaroo / λ-method): expected ~`2 · √(hi−lo+1)` group operations.
 
-### Backends (`KANGAROO_BACKEND` or Settings → Kangaroo)
-
 | Backend | Binary / cmd | Hardware |
 |---------|----------------|----------|
 | **`cpu`** (default) | `satoshi-kangaroo` | Multi-core CPU (libsecp256k1) |
-| **`jlp`** | JeanLucPons/Kangaroo CUDA build | NVIDIA GPU (RTX 3090 → `ccap=86`) |
-| **`external`** | Any command emitting JSONL | Your wrapper (RCKangaroo, SSH, pool client, …) |
+| **`jlp`** | JeanLucPons/Kangaroo CUDA build | NVIDIA GPU on the **same** host |
+| **`external`** | Command → JSONL | Remote GPU (SSH), forks, RCKangaroo, … |
 
 ```sh
-npm run grind:build              # satoshi-grind + satoshi-kangaroo
-npm run kangaroo:selftest
-npm run kangaroo -- --puzzle 40  # uses configured backend
-
-# On a CUDA box (example — see scripts/kangaroo-jlp-example.env):
-export KANGAROO_BACKEND=jlp
-export KANGAROO_JLP_BIN=/opt/Kangaroo/kangaroo
-export KANGAROO_JLP_GPU=1
-export KANGAROO_JLP_GPU_ID=0
-npm run kangaroo -- --puzzle 125
+npm run grind:build
+npm run kangaroo -- --puzzle 40
 ```
 
-**JeanLucPons build (Linux + CUDA, RTX 3090):**
+**Full setup for a remote RTX 3090 (or any CUDA box), topologies, SSH wrapper, workfiles, and
+security:** see **[`KANGAROO-GPU.md`](./KANGAROO-GPU.md)**.
 
-```sh
-git clone https://github.com/JeanLucPons/Kangaroo.git && cd Kangaroo
-# set CUDA path in makefile if needed
-make gpu=1 ccap=86 all
-```
-
-Stock JLP is limited to ~**125-bit** intervals; for larger exposed puzzles use a maintained fork
-(or RCKangaroo via `external`). The app writes JLP’s `in.txt` (lo / hi / pubkey), passes `-gpu`,
-parses `MKey/s` progress lines and `Priv: 0x…` / `-o` result file.
-
-**External JSONL protocol** (stdout, one event per line):
-
-```json
-{"event":"progress","ops":123,"dps":4,"opsPerSec":1.2e9,"elapsedMs":5000}
-{"event":"found","priv":"<64 hex>","ops":…,"elapsedMs":…}
-{"event":"exhausted","ops":…,"elapsedMs":…}
-{"event":"cancelled","ops":…,"elapsedMs":…}
-{"event":"error","message":"…"}
-```
-
-Template placeholders: `{pubkey}` `{lo}` `{hi}` `{lo64}` `{hi64}` `{threads}` `{dp}` `{max_ops}` `{puzzle}`.
-Also exported as env vars `KANGAROO_PUBKEY`, `KANGAROO_LO`, …
+Short local-GPU env sketch: [`scripts/kangaroo-jlp-example.env`](../scripts/kangaroo-jlp-example.env).
 
 UI: **Grinder → Pollard's kangaroo** and **Settings → Kangaroo backend**. Hits use the same vault /
-audit / rescue pipeline as sequential grinds.
-
-Honest math: #135–#140 is multi-GPU / pool territory (~2^67–2^70 ops). A 3090 is orders of magnitude
-faster than a laptop CPU, not a skip of the square-root barrier.
+audit / rescue pipeline as sequential grinds. Honest math: deep exposed puzzles remain multi-GPU /
+pool-scale work — a 3090 is a large upgrade over a laptop, not a skip of the \(\sqrt{\cdot}\) barrier.
 
 ## Why this maps onto real threats
 

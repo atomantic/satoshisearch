@@ -46,14 +46,19 @@ if (has(argv, '--selftest')) {
 
 const avail = kangarooAvailability();
 const cfg = effectiveKangaroo();
-console.error(`backend: ${avail.backend} (${cfg.source}) — ${avail.detail}`);
+console.error(`mode: ${avail.mode} · backend: ${avail.backend} (${cfg.source}) — ${avail.detail}`);
+if (avail.sshHost) console.error(`ssh: ${avail.sshHost}`);
 
 if (!avail.available) {
   console.error(`unavailable: ${avail.detail}`);
-  if (cfg.backend === 'cpu') console.error('Build: npm run grind:build');
-  if (cfg.backend === 'jlp') {
-    console.error('Set KANGAROO_JLP_BIN to your CUDA Kangaroo binary.');
+  if (cfg.mode === 'cpu') console.error('Build: npm run grind:build');
+  if (cfg.mode === 'local-gpu') {
+    console.error('Set local CUDA binary in Settings or KANGAROO_JLP_BIN.');
     console.error('Build JLP: make gpu=1 ccap=86 all   # 3090 = sm_86');
+  }
+  if (cfg.mode === 'remote-gpu') {
+    console.error('Set SSH host in Settings → Kangaroo runner (or KANGAROO_SSH).');
+    console.error('See docs/KANGAROO-GPU.md');
   }
   process.exit(1);
 }

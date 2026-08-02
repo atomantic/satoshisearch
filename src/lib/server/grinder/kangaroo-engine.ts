@@ -33,7 +33,10 @@ export type ExposedPuzzle = {
 export type KangarooStatus = {
   available: boolean;
   backend: KangarooBackend;
+  /** cpu | local-gpu | remote-gpu | custom */
+  mode: string;
   backendDetail: string;
+  sshHost: string | null;
   running: boolean;
   puzzleN: number | null;
   address: string | null;
@@ -100,7 +103,9 @@ class KangarooEngine {
     return {
       available: avail.available,
       backend: avail.backend,
+      mode: avail.mode,
       backendDetail: avail.detail,
+      sshHost: avail.sshHost,
       running: this.running,
       puzzleN: this.target?.n ?? null,
       address: this.target?.address ?? null,

@@ -51,6 +51,82 @@ test('settings save/load/password-keep/clear round-trip in DATA_DIR', async () =
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('kangaroo remote-gpu mode resolves wrapper cmd and SSH fields', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ss-kang-'));
+  const prev = process.env.DATA_DIR;
+  const prevEnv: Record<string, string | undefined> = {
+    KANGAROO_MODE: process.env.KANGAROO_MODE,
+    KANGAROO_BACKEND: process.env.KANGAROO_BACKEND,
+    KANGAROO_SSH: process.env.KANGAROO_SSH,
+    KANGAROO_EXTERNAL_CMD: process.env.KANGAROO_EXTERNAL_CMD
+  };
+  process.env.DATA_DIR = dir;
+  delete process.env.KANGAROO_MODE;
+  delete process.env.KANGAROO_BACKEND;
+  delete process.env.KANGAROO_SSH;
+  delete process.env.KANGAROO_EXTERNAL_CMD;
+  try {
+    const {
+      updateSettings,
+      effectiveKangaroo,
+      kangarooModeToBackend,
+      DEFAULT_KANGAROO_SSH_WRAPPER
+    } = await import('../src/lib/server/settings.ts');
+
+    updateSettings({
+      kangaroo: {
+        mode: 'remote-gpu',
+        backend: kangarooModeToBackend('remote-gpu'),
+        sshHost: 'gpu@3090.local',
+        remoteBin: '/opt/Kangaroo/kangaroo',
+        wrapperPath: '',
+        externalCmd: '',
+        jlpBin: '',
+        jlpExtraArgs: '-d 16',
+        jlpGpuId: '0',
+        jlpUseGpu: true,
+        sshOpts: '-o BatchMode=yes'
+      }
+    });
+    const k = effectiveKangaroo();
+    assert.equal(k.mode, 'remote-gpu');
+    assert.equal(k.backend, 'external');
+    assert.equal(k.sshHost, 'gpu@3090.local');
+    assert.equal(k.remoteBin, '/opt/Kangaroo/kangaroo');
+    assert.equal(k.wrapperPath, DEFAULT_KANGAROO_SSH_WRAPPER);
+    assert.equal(k.externalCmd, `${DEFAULT_KANGAROO_SSH_WRAPPER} {pubkey} {lo} {hi}`);
+    assert.equal(k.jlpExtraArgs, '-d 16');
+
+    updateSettings({
+      kangaroo: {
+        mode: 'cpu',
+        backend: 'cpu',
+        sshHost: 'gpu@3090.local', // keep host when switching away
+        remoteBin: '/opt/Kangaroo/kangaroo',
+        wrapperPath: '',
+        externalCmd: '',
+        jlpBin: '',
+        jlpExtraArgs: '',
+        jlpGpuId: '',
+        jlpUseGpu: null,
+        sshOpts: ''
+      }
+    });
+    const k2 = effectiveKangaroo();
+    assert.equal(k2.mode, 'cpu');
+    assert.equal(k2.backend, 'cpu');
+    assert.equal(k2.sshHost, 'gpu@3090.local');
+  } finally {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    if (prev === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('grind pace settings resolve light workers and throttle', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ss-grind-'));
   const prev = process.env.DATA_DIR;

@@ -168,24 +168,34 @@
     <a href="/settings">Settings</a>. #140 is still ~2<sup>69.5</sup> work.
   </p>
   <p class="faint small mono">
-    backend: {kg.backend}
+    mode: {kg.mode ?? kg.backend}
+    {#if kg.sshHost}
+      · {kg.sshHost}
+    {/if}
     {#if kg.backendDetail}
       · {kg.backendDetail}
     {/if}
   </p>
   {#if !kg.available}
     <p class="warn small">
-      {#if kg.backend === 'jlp'}
-        Set <span class="mono">KANGAROO_JLP_BIN</span> to your CUDA Kangaroo binary
-        (build with <span class="mono">make gpu=1 ccap=86 all</span> for RTX 3090).
-      {:else if kg.backend === 'external'}
-        Set <span class="mono">KANGAROO_EXTERNAL_CMD</span> to a command that emits JSONL.
+      {#if kg.mode === 'remote-gpu' || (kg.backend === 'external' && kg.sshHost)}
+        Remote GPU not ready — configure SSH host + wrapper in
+        <a href="/settings">Settings → Kangaroo runner</a>.
+      {:else if kg.mode === 'local-gpu' || kg.backend === 'jlp'}
+        Set the local CUDA binary in <a href="/settings">Settings</a>
+        (or <span class="mono">KANGAROO_JLP_BIN</span>).
+      {:else if kg.mode === 'custom' || kg.backend === 'external'}
+        Set a custom command in <a href="/settings">Settings</a>.
       {:else}
-        Binary missing — run <span class="mono">npm run grind:build</span>.
+        Binary missing — run <span class="mono">npm run grind:build</span>
+        or enable a remote GPU in <a href="/settings">Settings</a>.
       {/if}
     </p>
   {:else if kg.running}
-    <div class="v"><span class="pulse"></span>Running · puzzle #{kg.puzzleN} · {kg.backend}</div>
+    <div class="v">
+      <span class="pulse"></span>Running · puzzle #{kg.puzzleN} · {kg.mode ?? kg.backend}
+      {#if kg.sshHost}<span class="faint"> · {kg.sshHost}</span>{/if}
+    </div>
     <div class="metrics">
       <div><span class="faint">ops/sec</span><b class="num">{kg.opsPerSec.toLocaleString()}</b></div>
       <div><span class="faint">ops</span><b class="num">{bigCount(kg.ops)}</b></div>

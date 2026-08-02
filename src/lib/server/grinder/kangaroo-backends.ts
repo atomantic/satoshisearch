@@ -74,35 +74,60 @@ function resolveCpuBinary(): string | null {
 
 export function kangarooAvailability(): {
   backend: KangarooBackend;
+  mode: string;
   available: boolean;
   detail: string;
+  /** Remote GPU host when mode is remote-gpu. */
+  sshHost: string | null;
 } {
   const cfg = effectiveKangaroo();
+  if (cfg.mode === 'remote-gpu' || (cfg.backend === 'external' && cfg.sshHost)) {
+    const wrapper = cfg.wrapperPath;
+    const wrapperOk = !!wrapper && (existsSync(wrapper) || existsSync(join(process.cwd(), wrapper)));
+    const hostOk = !!cfg.sshHost.trim();
+    const cmd = cfg.externalCmd.trim();
+    const available = hostOk && wrapperOk && !!cmd;
+    let detail: string;
+    if (!hostOk) detail = 'remote-gpu · set SSH host (user@gpu-box)';
+    else if (!wrapperOk) detail = `remote-gpu · wrapper missing: ${wrapper}`;
+    else detail = `remote-gpu · ${cfg.sshHost} · ${cfg.remoteBin}`;
+    return {
+      backend: 'external',
+      mode: 'remote-gpu',
+      available,
+      detail,
+      sshHost: cfg.sshHost || null
+    };
+  }
   if (cfg.backend === 'jlp') {
     const jlp = cfg.jlpBin && existsSync(cfg.jlpBin) ? cfg.jlpBin : null;
     return {
       backend: 'jlp',
+      mode: 'local-gpu',
       available: !!jlp,
       detail: jlp
-        ? `jlp/cuda · ${jlp}${cfg.jlpExtraArgs ? ' ' + cfg.jlpExtraArgs : ''}`
-        : 'KANGAROO_JLP_BIN / settings kangaroo.jlpBin not found'
+        ? `local-gpu · ${jlp}${cfg.jlpExtraArgs ? ' ' + cfg.jlpExtraArgs : ''}`
+        : 'local-gpu · set JLP binary path (KANGAROO_JLP_BIN)',
+      sshHost: null
     };
   }
   if (cfg.backend === 'external') {
     const cmd = cfg.externalCmd.trim();
     return {
       backend: 'external',
+      mode: 'custom',
       available: !!cmd,
-      detail: cmd
-        ? `external · ${cmd}`
-        : 'KANGAROO_EXTERNAL_CMD / settings kangaroo.externalCmd empty'
+      detail: cmd ? `custom · ${cmd}` : 'custom · external command empty',
+      sshHost: null
     };
   }
   const cpu = resolveCpuBinary();
   return {
     backend: 'cpu',
+    mode: 'cpu',
     available: !!cpu,
-    detail: cpu ? `cpu · ${cpu}` : 'satoshi-kangaroo not built (npm run grind:build)'
+    detail: cpu ? `cpu · ${cpu}` : 'cpu · satoshi-kangaroo not built (npm run grind:build)',
+    sshHost: null
   };
 }
 
@@ -370,7 +395,13 @@ function runExternal(opts: KangarooSolveOpts): Run {
       KANGAROO_THREADS: vars.threads,
       KANGAROO_DP: vars.dp,
       KANGAROO_MAX_OPS: vars.max_ops,
-      KANGAROO_PUZZLE: vars.puzzle
+      KANGAROO_PUZZLE: vars.puzzle,
+      // Remote-GPU wrapper reads these (settings / env). Do not clobber if empty.
+      ...(cfg.sshHost ? { KANGAROO_SSH: cfg.sshHost } : {}),
+      ...(cfg.sshOpts ? { KANGAROO_SSH_OPTS: cfg.sshOpts } : {}),
+      ...(cfg.remoteBin ? { KANGAROO_JLP_REMOTE_BIN: cfg.remoteBin } : {}),
+      ...(cfg.jlpExtraArgs ? { KANGAROO_JLP_EXTRA: cfg.jlpExtraArgs } : {}),
+      ...(cfg.jlpGpuId ? { KANGAROO_JLP_GPU_ID: cfg.jlpGpuId } : {})
     }
   });
   return attachJsonlProcess(proc, opts, 'external-kangaroo');

@@ -72,24 +72,40 @@ export interface AppSettings {
   };
   /**
    * Pollard's kangaroo backend. Empty strings / nulls fall through to env
-   * (KANGAROO_BACKEND, KANGAROO_JLP_BIN, …).
+   * (KANGAROO_BACKEND, KANGAROO_JLP_BIN, KANGAROO_SSH, …).
    */
   kangaroo: {
+    /**
+     * UI mode — preferred over raw backend when set.
+     * cpu | local-gpu | remote-gpu | custom | '' (derive from backend/env).
+     */
+    mode: KangarooMode | '';
     /** cpu | jlp | external — '' = env or default cpu. */
     backend: KangarooBackend | '';
-    /** Path to JeanLucPons/Kangaroo (or compatible) CUDA binary. */
+    /** Path to JeanLucPons/Kangaroo (or compatible) CUDA binary (local-gpu). */
     jlpBin: string;
-    /** Extra CLI args for JLP (e.g. "-g 256,256"). */
+    /** Extra CLI args for JLP (local or remote, e.g. "-d 18 -ws -w …"). */
     jlpExtraArgs: string;
     /** Use -gpu (default true when backend is jlp). null = default true. */
     jlpUseGpu: boolean | null;
     /** -gpuId list, e.g. "0" or "0,1". */
     jlpGpuId: string;
     /**
-     * External command template. Placeholders: {pubkey} {lo} {hi} {lo64} {hi64}
-     * {threads} {dp} {max_ops} {puzzle}. Must emit JSONL events on stdout.
+     * External command template (custom mode). Placeholders: {pubkey} {lo} {hi}
+     * {lo64} {hi64} {threads} {dp} {max_ops} {puzzle}.
      */
     externalCmd: string;
+    /** Remote GPU: SSH target, e.g. user@gpu-box (KANGAROO_SSH). */
+    sshHost: string;
+    /** Extra ssh(1) options, e.g. "-o BatchMode=yes -i ~/.ssh/gpu". */
+    sshOpts: string;
+    /** Path to kangaroo binary *on the remote host*. */
+    remoteBin: string;
+    /**
+     * Local wrapper script for remote-gpu mode.
+     * Default when empty: scripts/kangaroo-ssh-wrapper.sh
+     */
+    wrapperPath: string;
   };
   /**
    * '' = unset, falls through to VAULT_KEY_HEX. Only ever populated via
@@ -104,8 +120,15 @@ export interface AppSettings {
 /** How aggressively the grinder uses CPU. */
 export type GrindPace = 'light' | 'normal' | 'full';
 
-/** Kangaroo solver backend. */
+/** Kangaroo solver backend (dispatch layer). */
 export type KangarooBackend = 'cpu' | 'jlp' | 'external';
+
+/** Operator-facing kangaroo runner mode (Settings UI). */
+export type KangarooMode = 'cpu' | 'local-gpu' | 'remote-gpu' | 'custom';
+
+/** Default local wrapper for remote-gpu mode. */
+export const DEFAULT_KANGAROO_SSH_WRAPPER = 'scripts/kangaroo-ssh-wrapper.sh';
+export const DEFAULT_KANGAROO_REMOTE_BIN = '/opt/Kangaroo/kangaroo';
 
 /** Where an effective value came from, for the Settings page provenance badges. */
 export type SettingsSource = 'settings' | 'env' | 'mixed' | 'none';
@@ -118,12 +141,17 @@ const DEFAULTS: AppSettings = {
   grind: { pace: 'normal', maxWorkers: null, throttleMs: null },
   richlist: { minSats: null, scriptPolicy: '', loyceUrl: '' },
   kangaroo: {
+    mode: '',
     backend: '',
     jlpBin: '',
     jlpExtraArgs: '',
     jlpUseGpu: null,
     jlpGpuId: '',
-    externalCmd: ''
+    externalCmd: '',
+    sshHost: '',
+    sshOpts: '',
+    remoteBin: '',
+    wrapperPath: ''
   },
   vaultKeyHex: '',
   updatedAt: null
@@ -137,6 +165,28 @@ function normalizePace(v: unknown): GrindPace {
 export function normalizeKangarooBackend(v: unknown): KangarooBackend | '' {
   if (v === 'cpu' || v === 'jlp' || v === 'external') return v;
   return '';
+}
+
+export function normalizeKangarooMode(v: unknown): KangarooMode | '' {
+  if (v === 'cpu' || v === 'local-gpu' || v === 'remote-gpu' || v === 'custom') return v;
+  return '';
+}
+
+/** Map UI mode → dispatch backend. */
+export function kangarooModeToBackend(mode: KangarooMode): KangarooBackend {
+  if (mode === 'local-gpu') return 'jlp';
+  if (mode === 'remote-gpu' || mode === 'custom') return 'external';
+  return 'cpu';
+}
+
+/** Infer UI mode from a stored backend + optional SSH host. */
+export function kangarooBackendToMode(
+  backend: KangarooBackend | '',
+  sshHost = ''
+): KangarooMode {
+  if (backend === 'jlp') return 'local-gpu';
+  if (backend === 'external') return sshHost.trim() ? 'remote-gpu' : 'custom';
+  return 'cpu';
 }
 
 /** Prefer live env so CLI/tests can override DATA_DIR without reloading config. */
@@ -213,12 +263,17 @@ function normalize(raw: Partial<AppSettings> | null | undefined): AppSettings {
       loyceUrl: String(rl.loyceUrl ?? '').trim()
     },
     kangaroo: {
+      mode: normalizeKangarooMode(kg.mode),
       backend: normalizeKangarooBackend(kg.backend),
       jlpBin: String(kg.jlpBin ?? '').trim(),
       jlpExtraArgs: String(kg.jlpExtraArgs ?? '').trim(),
       jlpUseGpu: boolOrNull(kg.jlpUseGpu),
       jlpGpuId: String(kg.jlpGpuId ?? '').trim(),
-      externalCmd: String(kg.externalCmd ?? '').trim()
+      externalCmd: String(kg.externalCmd ?? '').trim(),
+      sshHost: String(kg.sshHost ?? '').trim(),
+      sshOpts: String(kg.sshOpts ?? '').trim(),
+      remoteBin: String(kg.remoteBin ?? '').trim(),
+      wrapperPath: String(kg.wrapperPath ?? '').trim()
     },
     vaultKeyHex: String(raw?.vaultKeyHex ?? '').trim(),
     updatedAt: typeof raw?.updatedAt === 'number' ? raw.updatedAt : null
@@ -501,27 +556,53 @@ export function effectiveGrind(): {
 
 /**
  * Resolved kangaroo backend for the next kangaroo start.
- * Env: KANGAROO_BACKEND, KANGAROO_JLP_BIN, KANGAROO_JLP_EXTRA, KANGAROO_JLP_GPU,
- *      KANGAROO_JLP_GPU_ID, KANGAROO_EXTERNAL_CMD.
+ * Env: KANGAROO_BACKEND, KANGAROO_JLP_*, KANGAROO_EXTERNAL_CMD, KANGAROO_SSH,
+ *      KANGAROO_JLP_REMOTE_BIN, KANGAROO_SSH_OPTS, KANGAROO_WRAPPER.
  */
 export function effectiveKangaroo(): {
+  mode: KangarooMode;
   backend: KangarooBackend;
   jlpBin: string;
   jlpExtraArgs: string;
   jlpUseGpu: boolean;
   jlpGpuId: string;
   externalCmd: string;
+  sshHost: string;
+  sshOpts: string;
+  remoteBin: string;
+  wrapperPath: string;
   source: SettingsSource;
 } {
   const s = loadSettings().kangaroo;
   const env = (k: string) => (process.env[k] ?? '').trim();
 
-  const backend: KangarooBackend =
-    normalizeKangarooBackend(process.env.KANGAROO_BACKEND) || s.backend || 'cpu';
+  const sshHost = env('KANGAROO_SSH') || s.sshHost;
+  const sshOpts = env('KANGAROO_SSH_OPTS') || s.sshOpts;
+  const remoteBin = env('KANGAROO_JLP_REMOTE_BIN') || s.remoteBin || DEFAULT_KANGAROO_REMOTE_BIN;
+  const wrapperPath =
+    env('KANGAROO_WRAPPER') || s.wrapperPath || DEFAULT_KANGAROO_SSH_WRAPPER;
+
+  const envBackend = normalizeKangarooBackend(process.env.KANGAROO_BACKEND);
+  const envMode = normalizeKangarooMode(process.env.KANGAROO_MODE);
+  const storedMode = normalizeKangarooMode(s.mode);
+
+  // Mode precedence: env mode → env backend → stored mode → stored backend → cpu
+  let mode: KangarooMode = 'cpu';
+  if (envMode) {
+    mode = envMode;
+  } else if (envBackend) {
+    mode = kangarooBackendToMode(envBackend, sshHost);
+  } else if (storedMode) {
+    mode = storedMode;
+  } else if (s.backend) {
+    mode = kangarooBackendToMode(s.backend, s.sshHost || sshHost);
+  }
+
+  const backend: KangarooBackend = kangarooModeToBackend(mode);
+
   const jlpBin = env('KANGAROO_JLP_BIN') || s.jlpBin;
   const jlpExtraArgs = env('KANGAROO_JLP_EXTRA') || s.jlpExtraArgs;
   const jlpGpuId = env('KANGAROO_JLP_GPU_ID') || s.jlpGpuId;
-  const externalCmd = env('KANGAROO_EXTERNAL_CMD') || s.externalCmd;
 
   // Tri-state: env wins, else the stored value, else default on.
   let jlpUseGpu = true;
@@ -531,31 +612,52 @@ export function effectiveKangaroo(): {
     jlpUseGpu = s.jlpUseGpu;
   }
 
+  let externalCmd = env('KANGAROO_EXTERNAL_CMD') || s.externalCmd;
+  // remote-gpu auto-builds the SSH wrapper command unless custom cmd is forced via env.
+  if (mode === 'remote-gpu' && !env('KANGAROO_EXTERNAL_CMD')) {
+    externalCmd = `${wrapperPath} {pubkey} {lo} {hi}`;
+  }
+
   const ENV_KEYS = [
+    'KANGAROO_MODE',
     'KANGAROO_BACKEND',
     'KANGAROO_JLP_BIN',
     'KANGAROO_JLP_EXTRA',
     'KANGAROO_JLP_GPU',
     'KANGAROO_JLP_GPU_ID',
-    'KANGAROO_EXTERNAL_CMD'
+    'KANGAROO_EXTERNAL_CMD',
+    'KANGAROO_SSH',
+    'KANGAROO_SSH_OPTS',
+    'KANGAROO_JLP_REMOTE_BIN',
+    'KANGAROO_WRAPPER'
   ];
   const fromSettings = !!(
+    s.mode ||
     s.backend ||
     s.jlpBin ||
     s.jlpExtraArgs ||
     s.jlpGpuId ||
     s.jlpUseGpu !== null ||
-    s.externalCmd
+    s.externalCmd ||
+    s.sshHost ||
+    s.sshOpts ||
+    s.remoteBin ||
+    s.wrapperPath
   );
   const fromEnv = ENV_KEYS.some((k) => process.env[k]);
 
   return {
+    mode,
     backend,
     jlpBin,
     jlpExtraArgs,
     jlpUseGpu,
     jlpGpuId,
     externalCmd,
+    sshHost,
+    sshOpts,
+    remoteBin,
+    wrapperPath,
     source: pickSource(fromSettings, fromEnv)
   };
 }

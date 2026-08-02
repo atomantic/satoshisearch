@@ -51,7 +51,8 @@ npm test                      # unit tests (script/P2PK primitives)
 
 Native tools need `cc`, `cmake`, `make`, and `git` once (clones libsecp256k1). Without them the
 app still runs sequential grind via JS workers (`SATOSHI_GRIND_JS=1` forces that path); kangaroo
-requires the native binary. See `native/grinder/README.md` and `docs/KEYSPACE.md`.
+requires a backend (CPU binary and/or CUDA). See `native/grinder/README.md`, `docs/KEYSPACE.md`,
+and **`docs/KANGAROO-GPU.md`** for a remote RTX 3090 / JeanLucPons setup (including SSH runner).
 
 For an always-on weak-key race (separate from the UI process):
 

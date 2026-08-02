@@ -21,10 +21,15 @@ import {
   effectiveGrind,
   effectiveKangaroo,
   normalizeKangarooBackend,
+  normalizeKangarooMode,
+  kangarooModeToBackend,
+  DEFAULT_KANGAROO_SSH_WRAPPER,
+  DEFAULT_KANGAROO_REMOTE_BIN,
   vaultKeyStatusView,
   generateVaultKey
 } from '$server/settings';
 import { kangarooAvailability } from '$server/grinder/kangaroo-backends';
+import { spawnSync } from 'node:child_process';
 import { getBlockchainInfo, isRpcConfigured, resolveRpcAuth } from '$server/bitcoin/rpc';
 import { audit } from '$server/rescue/audit';
 
@@ -98,15 +103,24 @@ export const load: PageServerLoad = async () => {
       stored: loadSettings().grind
     },
     kangaroo: {
+      mode: kangaroo.mode,
       backend: kangaroo.backend,
       jlpBin: kangaroo.jlpBin,
       jlpExtraArgs: kangaroo.jlpExtraArgs,
       jlpUseGpu: kangaroo.jlpUseGpu,
       jlpGpuId: kangaroo.jlpGpuId,
       externalCmd: kangaroo.externalCmd,
+      sshHost: kangaroo.sshHost,
+      sshOpts: kangaroo.sshOpts,
+      remoteBin: kangaroo.remoteBin,
+      wrapperPath: kangaroo.wrapperPath,
       source: kangaroo.source,
       available: kangarooAvail.available,
       detail: kangarooAvail.detail,
+      defaults: {
+        wrapperPath: DEFAULT_KANGAROO_SSH_WRAPPER,
+        remoteBin: DEFAULT_KANGAROO_REMOTE_BIN
+      },
       stored: loadSettings().kangaroo
     },
     richlist: {
@@ -316,34 +330,112 @@ export const actions: Actions = {
 
   saveKangaroo: async ({ request }) => {
     const data = await request.formData();
-    const backend = normalizeKangarooBackend(String(data.get('backend') ?? '').trim());
+    const modeRaw = String(data.get('mode') ?? data.get('backend') ?? '').trim();
+    // Accept legacy backend values (cpu|jlp|external) and new mode values.
+    let mode = normalizeKangarooMode(modeRaw);
+    if (!mode) {
+      const legacy = normalizeKangarooBackend(modeRaw);
+      if (legacy === 'jlp') mode = 'local-gpu';
+      else if (legacy === 'external') mode = 'custom';
+      else if (legacy === 'cpu') mode = 'cpu';
+    }
+    if (!mode) mode = 'cpu';
+
     const jlpBin = String(data.get('jlpBin') ?? '').trim();
     const jlpExtraArgs = String(data.get('jlpExtraArgs') ?? '').trim();
     const jlpGpuId = String(data.get('jlpGpuId') ?? '').trim();
-    // Checkbox is absent when unchecked; the field is tri-state (null = follow
-    // the default), and the form always submits it, so absent means "off".
     const jlpUseGpu = data.get('jlpUseGpu') === 'on';
     const externalCmd = String(data.get('externalCmd') ?? '').trim();
+    const sshHost = String(data.get('sshHost') ?? '').trim();
+    const sshOpts = String(data.get('sshOpts') ?? '').trim();
+    const remoteBin = String(data.get('remoteBin') ?? '').trim();
+    const wrapperPath = String(data.get('wrapperPath') ?? '').trim();
+
+    if (mode === 'remote-gpu' && !sshHost) {
+      return fail(400, { error: 'Remote GPU requires an SSH host (user@gpu-box).' });
+    }
+    if (mode === 'local-gpu' && !jlpBin) {
+      return fail(400, { error: 'Local GPU requires a path to the JeanLucPons (or compatible) binary.' });
+    }
+    if (mode === 'custom' && !externalCmd) {
+      return fail(400, { error: 'Custom mode requires an external command template.' });
+    }
+
+    const backend = kangarooModeToBackend(mode);
+    // remote-gpu: store empty externalCmd so effectiveKangaroo auto-builds the wrapper.
+    const storedExternal =
+      mode === 'remote-gpu' ? '' : mode === 'custom' ? externalCmd : externalCmd;
 
     updateSettings({
       kangaroo: {
+        mode,
         backend,
         jlpBin,
         jlpExtraArgs,
         jlpGpuId,
         jlpUseGpu,
-        externalCmd
+        externalCmd: storedExternal,
+        sshHost,
+        sshOpts,
+        remoteBin,
+        wrapperPath
       }
     });
     audit('settings-kangaroo-saved', {
-      backend: backend || 'cpu(default)',
+      mode,
+      backend,
       jlpBin: jlpBin || null,
       jlpUseGpu,
       jlpGpuId: jlpGpuId || null,
-      externalCmd: externalCmd ? '[set]' : null
+      sshHost: sshHost || null,
+      remoteBin: remoteBin || null,
+      externalCmd: storedExternal ? '[set]' : null
     });
     return {
-      done: `Saved kangaroo backend: ${backend || 'cpu (default)'}. Takes effect on the next kangaroo start.`
+      done: `Saved kangaroo runner: ${mode}${sshHost ? ` · ${sshHost}` : ''}. Takes effect on the next kangaroo start.`
+    };
+  },
+
+  testKangarooRemote: async ({ request }) => {
+    const data = await request.formData();
+    // Prefer form fields (unsaved) so operators can test before save.
+    const sshHost =
+      String(data.get('sshHost') ?? '').trim() || effectiveKangaroo().sshHost;
+    const sshOpts =
+      String(data.get('sshOpts') ?? '').trim() || effectiveKangaroo().sshOpts;
+    const remoteBin =
+      String(data.get('remoteBin') ?? '').trim() ||
+      effectiveKangaroo().remoteBin ||
+      DEFAULT_KANGAROO_REMOTE_BIN;
+
+    if (!sshHost) {
+      return fail(400, { error: 'SSH host is empty — set user@gpu-box first.' });
+    }
+
+    const opts = sshOpts
+      ? sshOpts.split(/\s+/).filter(Boolean)
+      : ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8'];
+
+    const probe = spawnSync(
+      'ssh',
+      [...opts, sshHost, `nvidia-smi -L 2>/dev/null; command -v '${remoteBin}' && '${remoteBin}' -l 2>/dev/null | head -20; echo __SS_OK__`],
+      { encoding: 'utf8', timeout: 20_000 }
+    );
+
+    const out = `${probe.stdout || ''}${probe.stderr || ''}`.trim();
+    if (probe.error) {
+      return fail(400, { error: `SSH failed to start: ${probe.error.message}` });
+    }
+    if (probe.status !== 0 && !out.includes('__SS_OK__')) {
+      return fail(400, {
+        error: `SSH probe failed (exit ${probe.status}): ${out.slice(0, 500) || 'no output — check keys / host / BatchMode'}`
+      });
+    }
+
+    const clean = out.replace(/\n?__SS_OK__\n?/g, '').trim();
+    audit('settings-kangaroo-remote-test', { sshHost, remoteBin, ok: true });
+    return {
+      done: `Remote GPU probe OK · ${sshHost}\n${clean.slice(0, 800) || '(connected; no nvidia-smi / -l output)'}`
     };
   },
 
