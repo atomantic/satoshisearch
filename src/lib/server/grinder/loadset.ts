@@ -7,16 +7,35 @@
 import { openDb } from '../db';
 import { emptyMatchSet, type MatchSet } from './matchset';
 
+export type MatchSetCounts = { hash160s: number; pubkeys: number; size: number };
+
+/**
+ * Cached because the grinder page re-runs its whole load every 1.5s while a
+ * grind or kangaroo is running — for hours. The COUNT(DISTINCT pubkey) is a
+ * full scan of ~800k rows (~140ms, and node:sqlite is synchronous, so that is
+ * event-loop time), while the counts only change when the indexer writes.
+ */
+let countsCache: { at: number; value: MatchSetCounts } | null = null;
+const COUNTS_TTL_MS = 30_000;
+
+/** Drop the cached counts — call after any write to `target`. */
+export function invalidateMatchSetCounts(): void {
+  countsCache = null;
+}
+
 /**
  * Count distinct match keys without materializing them. The grinder page only
  * renders sizes; building two ~1M-entry Sets to read `.size` is pure waste.
  */
-export function matchSetCounts(): { hash160s: number; pubkeys: number; size: number } {
+export function matchSetCounts(): MatchSetCounts {
+  if (countsCache && Date.now() - countsCache.at < COUNTS_TTL_MS) return countsCache.value;
   const db = openDb();
   const one = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
   const hash160s = one(`SELECT COUNT(DISTINCT hash160) n FROM target WHERE hash160 IS NOT NULL`);
   const pubkeys = one(`SELECT COUNT(DISTINCT pubkey) n FROM target WHERE pubkey IS NOT NULL`);
-  return { hash160s, pubkeys, size: hash160s + pubkeys };
+  const value = { hash160s, pubkeys, size: hash160s + pubkeys };
+  countsCache = { at: Date.now(), value };
+  return value;
 }
 
 export function loadMatchSet(): MatchSet {

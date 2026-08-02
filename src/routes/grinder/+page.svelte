@@ -3,23 +3,24 @@
   import { enhance } from '$app/forms';
   import { invalidateAll } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
-  import { bigCount } from '$lib/format';
+  import { bigCount, btcShort, shortAddr } from '$lib/format';
 
   export let data: PageData;
   export let form: ActionData;
 
   let selected = data.sources.find((s) => s.available)?.id ?? '';
 
-  // Poll status while a grind is running so keys/sec updates live.
+  // Poll status while a grind or kangaroo is running so rates update live.
   let timer: ReturnType<typeof setInterval> | undefined;
   onMount(() => {
     timer = setInterval(() => {
-      if (data.status.running) invalidateAll();
+      if (data.status.running || data.kangaroo.running) invalidateAll();
     }, 1500);
   });
   onDestroy(() => clearInterval(timer));
 
   $: st = data.status;
+  $: kg = data.kangaroo;
   $: matchN = data.matchSet.size;
   $: snap = data.richlistSnapshot;
   $: snapAgeH = snap ? Math.round((Date.now() / 1000 - snap.createdAt) / 3600) : null;
@@ -113,11 +114,7 @@
         · {data.grind.throttleMs}ms throttle
         · <a href="/settings">change</a>
       </p>
-      <form
-        method="POST"
-        action="?/start"
-        use:enhance={() => async ({ update }) => { await update(); }}
-      >
+      <form method="POST" action="?/start" use:enhance>
         <label class="sel">
           <span class="faint">Source</span>
           <select name="source" bind:value={selected}>
@@ -159,6 +156,71 @@
     </ul>
     <a href="/settings" class="faint small">Configure in Settings →</a>
   </div>
+</div>
+
+<div class="card kang-card" class:live={kg.running}>
+  <div class="k">Pollard's kangaroo · exposed puzzles</div>
+  <p class="faint small kang-blurb">
+    Interval ECDLP (~2<sup>n/2</sup> ops) for pubkey-known puzzles — not sequential grind.
+    Backends: <span class="mono">cpu</span> (satoshi-kangaroo),
+    <span class="mono">jlp</span> (JeanLucPons CUDA on your 3090),
+    <span class="mono">external</span> (any JSONL solver). Configure via env or
+    <a href="/settings">Settings</a>. #140 is still ~2<sup>69.5</sup> work.
+  </p>
+  <p class="faint small mono">
+    backend: {kg.backend}
+    {#if kg.backendDetail}
+      · {kg.backendDetail}
+    {/if}
+  </p>
+  {#if !kg.available}
+    <p class="warn small">
+      {#if kg.backend === 'jlp'}
+        Set <span class="mono">KANGAROO_JLP_BIN</span> to your CUDA Kangaroo binary
+        (build with <span class="mono">make gpu=1 ccap=86 all</span> for RTX 3090).
+      {:else if kg.backend === 'external'}
+        Set <span class="mono">KANGAROO_EXTERNAL_CMD</span> to a command that emits JSONL.
+      {:else}
+        Binary missing — run <span class="mono">npm run grind:build</span>.
+      {/if}
+    </p>
+  {:else if kg.running}
+    <div class="v"><span class="pulse"></span>Running · puzzle #{kg.puzzleN} · {kg.backend}</div>
+    <div class="metrics">
+      <div><span class="faint">ops/sec</span><b class="num">{kg.opsPerSec.toLocaleString()}</b></div>
+      <div><span class="faint">ops</span><b class="num">{bigCount(kg.ops)}</b></div>
+      <div><span class="faint">DPs</span><b class="num">{bigCount(kg.dps)}</b></div>
+      <div><span class="faint">~work</span><b class="num">2<sup>{kg.halfBits}</sup></b></div>
+      <div><span class="faint">hits</span><b class="num" class:btc={kg.hits > 0}>{kg.hits}</b></div>
+    </div>
+    <p class="faint small mono">{shortAddr(kg.address ?? '')}</p>
+    <form method="POST" action="?/kangarooStop" use:enhance>
+      <button class="stop">Stop kangaroo</button>
+    </form>
+  {:else}
+    {#if data.kangarooTargets.length === 0}
+      <p class="faint small">
+        No exposed+funded puzzles with stored pubkeys. Re-index puzzles after the node is up.
+      </p>
+    {:else}
+      <form method="POST" action="?/kangarooStart" use:enhance>
+        <label class="sel">
+          <span class="faint">Exposed target</span>
+          <select name="puzzle">
+            {#each data.kangarooTargets as t}
+              <option value={t.n}>
+                #{t.n} · ~2^{t.halfBits} · {btcShort(t.balance)} BTC · {shortAddr(t.address)}
+              </option>
+            {/each}
+          </select>
+        </label>
+        <button class="btn-accent" disabled={!kg.available}>Start kangaroo</button>
+      </form>
+    {/if}
+    {#if kg.lastResult}
+      <p class="faint small">Last: {kg.lastResult}</p>
+    {/if}
+  {/if}
 </div>
 
 <div class="card">
@@ -210,6 +272,16 @@
     padding: 10px 14px;
     font-size: 13px;
     margin-bottom: 16px;
+  }
+  .kang-card {
+    margin-bottom: 16px;
+  }
+  .kang-card.live {
+    border-color: rgba(255, 176, 32, 0.45);
+  }
+  .kang-blurb {
+    max-width: 780px;
+    margin: 6px 0 12px;
   }
   .err {
     background: rgba(255, 87, 87, 0.1);

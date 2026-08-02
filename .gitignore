@@ -13,6 +13,7 @@ node_modules/
 /data/vault/
 /data/*.local.json
 /data/settings.json
+/data/*.jsonl
 
 # Rescue secrets must never be committed
 *.key
@@ -26,6 +27,8 @@ secrets/
 !/datasets/fixtures/
 
 # Native grinder build artifacts (secp256k1 is cloned on first `make`)
-/native/grinder/satoshi-grind
+# Glob covers every binary the Makefile emits, so a new one is ignored by default.
+/native/grinder/satoshi-*
 /native/grinder/*.o
+/native/grinder/*.d
 /native/grinder/third_party/

@@ -19,9 +19,12 @@ import {
   effectiveRuntime,
   effectiveRichlist,
   effectiveGrind,
+  effectiveKangaroo,
+  normalizeKangarooBackend,
   vaultKeyStatusView,
   generateVaultKey
 } from '$server/settings';
+import { kangarooAvailability } from '$server/grinder/kangaroo-backends';
 import { getBlockchainInfo, isRpcConfigured, resolveRpcAuth } from '$server/bitcoin/rpc';
 import { audit } from '$server/rescue/audit';
 
@@ -60,6 +63,8 @@ export const load: PageServerLoad = async () => {
   const rescue = effectiveRescue();
   const runtime = effectiveRuntime();
   const grind = effectiveGrind();
+  const kangaroo = effectiveKangaroo();
+  const kangarooAvail = kangarooAvailability();
   const richlist = effectiveRichlist();
 
   return {
@@ -91,6 +96,18 @@ export const load: PageServerLoad = async () => {
       source: grind.source,
       /** Raw overrides as stored (null = use pace default). */
       stored: loadSettings().grind
+    },
+    kangaroo: {
+      backend: kangaroo.backend,
+      jlpBin: kangaroo.jlpBin,
+      jlpExtraArgs: kangaroo.jlpExtraArgs,
+      jlpUseGpu: kangaroo.jlpUseGpu,
+      jlpGpuId: kangaroo.jlpGpuId,
+      externalCmd: kangaroo.externalCmd,
+      source: kangaroo.source,
+      available: kangarooAvail.available,
+      detail: kangarooAvail.detail,
+      stored: loadSettings().kangaroo
     },
     richlist: {
       minSats: richlist.minSats,
@@ -294,6 +311,39 @@ export const actions: Actions = {
     audit('settings-grind-saved', { pace, maxWorkers, throttleMs });
     return {
       done: `Saved grinder pace: ${pace}${maxWorkers ? ` · max ${maxWorkers} workers` : ''}${throttleMs != null ? ` · ${throttleMs}ms throttle` : ''}. Takes effect on the next grind start.`
+    };
+  },
+
+  saveKangaroo: async ({ request }) => {
+    const data = await request.formData();
+    const backend = normalizeKangarooBackend(String(data.get('backend') ?? '').trim());
+    const jlpBin = String(data.get('jlpBin') ?? '').trim();
+    const jlpExtraArgs = String(data.get('jlpExtraArgs') ?? '').trim();
+    const jlpGpuId = String(data.get('jlpGpuId') ?? '').trim();
+    // Checkbox is absent when unchecked; the field is tri-state (null = follow
+    // the default), and the form always submits it, so absent means "off".
+    const jlpUseGpu = data.get('jlpUseGpu') === 'on';
+    const externalCmd = String(data.get('externalCmd') ?? '').trim();
+
+    updateSettings({
+      kangaroo: {
+        backend,
+        jlpBin,
+        jlpExtraArgs,
+        jlpGpuId,
+        jlpUseGpu,
+        externalCmd
+      }
+    });
+    audit('settings-kangaroo-saved', {
+      backend: backend || 'cpu(default)',
+      jlpBin: jlpBin || null,
+      jlpUseGpu,
+      jlpGpuId: jlpGpuId || null,
+      externalCmd: externalCmd ? '[set]' : null
+    });
+    return {
+      done: `Saved kangaroo backend: ${backend || 'cpu (default)'}. Takes effect on the next kangaroo start.`
     };
   },
 

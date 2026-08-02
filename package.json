@@ -25,6 +25,8 @@
     "grind:bench": "make -C native/grinder bench",
     "grind:bench:range": "make -C native/grinder && ./native/grinder/satoshi-grind --bench-range 500000",
     "grind:bench:pool": "tsx scripts/bench-grind.ts",
+    "kangaroo": "tsx scripts/kangaroo.ts",
+    "kangaroo:selftest": "make -C native/grinder kangaroo && ./native/grinder/satoshi-kangaroo --selftest",
     "rescue:check": "tsx scripts/rescue-runner.ts check",
     "rescue:run": "tsx scripts/rescue-runner.ts run"
   },

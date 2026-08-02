@@ -53,6 +53,16 @@
     data.grind.stored.maxWorkers != null ? String(data.grind.stored.maxWorkers) : '';
   let grindThrottleMs =
     data.grind.stored.throttleMs != null ? String(data.grind.stored.throttleMs) : '';
+
+  // Kangaroo backend
+  // Show the stored value when set, else what env/defaults resolved to — both
+  // are already non-null strings, so no further fallback is reachable.
+  let kangBackend = data.kangaroo.stored.backend || data.kangaroo.backend;
+  let kangJlpBin = data.kangaroo.stored.jlpBin || data.kangaroo.jlpBin;
+  let kangJlpExtra = data.kangaroo.stored.jlpExtraArgs || data.kangaroo.jlpExtraArgs;
+  let kangJlpGpuId = data.kangaroo.stored.jlpGpuId || data.kangaroo.jlpGpuId;
+  let kangJlpUseGpu = data.kangaroo.stored.jlpUseGpu ?? data.kangaroo.jlpUseGpu;
+  let kangExternal = data.kangaroo.stored.externalCmd || data.kangaroo.externalCmd;
 </script>
 
 <svelte:head><title>Settings · satoshisearch</title></svelte:head>
@@ -466,6 +476,81 @@
     </div>
     <div class="actions">
       <button type="submit" disabled={!!busy}>{busy === 'save-grind' ? 'Saving…' : 'Save grinder pace'}</button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="k">Kangaroo backend (GPU / external)</div>
+  <p class="faint small top-note">
+    Exposed-puzzle ECDLP solver. Source: <b>{data.kangaroo.source}</b> · effective:
+    <b class="mono">{data.kangaroo.backend}</b>
+    {#if data.kangaroo.available}
+      · ready
+    {:else}
+      · <span class="warn">not ready</span>
+    {/if}
+    · {data.kangaroo.detail}
+  </p>
+  <form method="POST" action="?/saveKangaroo" class="rpc-form" use:enhance={track('save-kangaroo')}>
+    <fieldset class="pace-set">
+      <legend>Backend</legend>
+      <label class="pace-item">
+        <input type="radio" name="backend" value="cpu" bind:group={kangBackend} />
+        <span>
+          <b>CPU</b>
+          <em class="faint">— satoshi-kangaroo (libsecp256k1). Default. ~Mops/s on a laptop.</em>
+        </span>
+      </label>
+      <label class="pace-item">
+        <input type="radio" name="backend" value="jlp" bind:group={kangBackend} />
+        <span>
+          <b>JLP / CUDA</b>
+          <em class="faint">— JeanLucPons Kangaroo (or compatible). Point at a GPU build on this host (RTX 3090: ccap=86).</em>
+        </span>
+      </label>
+      <label class="pace-item">
+        <input type="radio" name="backend" value="external" bind:group={kangBackend} />
+        <span>
+          <b>External</b>
+          <em class="faint">— any command emitting JSONL progress/found events (RCKangaroo wrapper, remote SSH, …).</em>
+        </span>
+      </label>
+    </fieldset>
+    <div class="rpc-grid">
+      <label class="full">
+        <span>JLP binary path <em class="faint">(KANGAROO_JLP_BIN)</em></span>
+        <input name="jlpBin" type="text" class="mono" placeholder="/opt/Kangaroo/kangaroo" bind:value={kangJlpBin} />
+      </label>
+      <label>
+        <span>GPU id(s) <em class="faint">(-gpuId)</em></span>
+        <input name="jlpGpuId" type="text" class="mono" placeholder="0" bind:value={kangJlpGpuId} />
+      </label>
+      <label class="check">
+        <input type="checkbox" name="jlpUseGpu" bind:checked={kangJlpUseGpu} />
+        <span>Enable <span class="mono">-gpu</span></span>
+      </label>
+      <label class="full">
+        <span>JLP extra args</span>
+        <input name="jlpExtraArgs" type="text" class="mono" placeholder="-d 18 -ws -w /data/kang.work -wi 300" bind:value={kangJlpExtra} />
+      </label>
+      <label class="full">
+        <span>External command template <em class="faint">({'{pubkey} {lo} {hi} {lo64} {hi64} {threads} {puzzle}'})</em></span>
+        <input
+          name="externalCmd"
+          type="text"
+          class="mono"
+          placeholder={'./scripts/my-kangaroo-wrapper.sh {pubkey} {lo} {hi}'}
+          bind:value={kangExternal}
+        />
+      </label>
+    </div>
+    <p class="faint small">
+      Stock JeanLucPons is limited to ~125-bit intervals; use a maintained fork for larger puzzles.
+      See <span class="mono">scripts/kangaroo-jlp-example.env</span> and <span class="mono">docs/KEYSPACE.md</span>.
+    </p>
+    <div class="actions">
+      <button type="submit" disabled={!!busy}>{busy === 'save-kangaroo' ? 'Saving…' : 'Save kangaroo backend'}</button>
     </div>
   </form>
 </div>

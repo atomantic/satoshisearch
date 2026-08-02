@@ -71,6 +71,27 @@ export interface AppSettings {
     loyceUrl: string;
   };
   /**
+   * Pollard's kangaroo backend. Empty strings / nulls fall through to env
+   * (KANGAROO_BACKEND, KANGAROO_JLP_BIN, …).
+   */
+  kangaroo: {
+    /** cpu | jlp | external — '' = env or default cpu. */
+    backend: KangarooBackend | '';
+    /** Path to JeanLucPons/Kangaroo (or compatible) CUDA binary. */
+    jlpBin: string;
+    /** Extra CLI args for JLP (e.g. "-g 256,256"). */
+    jlpExtraArgs: string;
+    /** Use -gpu (default true when backend is jlp). null = default true. */
+    jlpUseGpu: boolean | null;
+    /** -gpuId list, e.g. "0" or "0,1". */
+    jlpGpuId: string;
+    /**
+     * External command template. Placeholders: {pubkey} {lo} {hi} {lo64} {hi64}
+     * {threads} {dp} {max_ops} {puzzle}. Must emit JSONL events on stdout.
+     */
+    externalCmd: string;
+  };
+  /**
    * '' = unset, falls through to VAULT_KEY_HEX. Only ever populated via
    * generateVaultKey() — there is no UI path to overwrite an existing key,
    * since rotating it orphans already-encrypted recovered private keys.
@@ -83,6 +104,9 @@ export interface AppSettings {
 /** How aggressively the grinder uses CPU. */
 export type GrindPace = 'light' | 'normal' | 'full';
 
+/** Kangaroo solver backend. */
+export type KangarooBackend = 'cpu' | 'jlp' | 'external';
+
 /** Where an effective value came from, for the Settings page provenance badges. */
 export type SettingsSource = 'settings' | 'env' | 'mixed' | 'none';
 
@@ -93,6 +117,14 @@ const DEFAULTS: AppSettings = {
   runtime: { mempoolApiUrl: '', concurrency: null, coinbaseMaxHeight: null },
   grind: { pace: 'normal', maxWorkers: null, throttleMs: null },
   richlist: { minSats: null, scriptPolicy: '', loyceUrl: '' },
+  kangaroo: {
+    backend: '',
+    jlpBin: '',
+    jlpExtraArgs: '',
+    jlpUseGpu: null,
+    jlpGpuId: '',
+    externalCmd: ''
+  },
   vaultKeyHex: '',
   updatedAt: null
 };
@@ -100,6 +132,11 @@ const DEFAULTS: AppSettings = {
 function normalizePace(v: unknown): GrindPace {
   if (v === 'light' || v === 'normal' || v === 'full') return v;
   return 'normal';
+}
+
+export function normalizeKangarooBackend(v: unknown): KangarooBackend | '' {
+  if (v === 'cpu' || v === 'jlp' || v === 'external') return v;
+  return '';
 }
 
 /** Prefer live env so CLI/tests can override DATA_DIR without reloading config. */
@@ -138,6 +175,7 @@ function normalize(raw: Partial<AppSettings> | null | undefined): AppSettings {
   const rt: Partial<AppSettings['runtime']> = raw?.runtime ?? {};
   const g: Partial<AppSettings['grind']> = raw?.grind ?? {};
   const rl: Partial<AppSettings['richlist']> = raw?.richlist ?? {};
+  const kg: Partial<AppSettings['kangaroo']> = raw?.kangaroo ?? {};
   const port = Number(f.port);
   return {
     bitcoinRpc: {
@@ -173,6 +211,14 @@ function normalize(raw: Partial<AppSettings> | null | undefined): AppSettings {
       minSats: numOrNull(rl.minSats),
       scriptPolicy: String(rl.scriptPolicy ?? '').trim(),
       loyceUrl: String(rl.loyceUrl ?? '').trim()
+    },
+    kangaroo: {
+      backend: normalizeKangarooBackend(kg.backend),
+      jlpBin: String(kg.jlpBin ?? '').trim(),
+      jlpExtraArgs: String(kg.jlpExtraArgs ?? '').trim(),
+      jlpUseGpu: boolOrNull(kg.jlpUseGpu),
+      jlpGpuId: String(kg.jlpGpuId ?? '').trim(),
+      externalCmd: String(kg.externalCmd ?? '').trim()
     },
     vaultKeyHex: String(raw?.vaultKeyHex ?? '').trim(),
     updatedAt: typeof raw?.updatedAt === 'number' ? raw.updatedAt : null
@@ -247,6 +293,7 @@ export function updateSettings(
     runtime?: Partial<AppSettings['runtime']>;
     grind?: Partial<AppSettings['grind']>;
     richlist?: Partial<AppSettings['richlist']>;
+    kangaroo?: Partial<AppSettings['kangaroo']>;
   },
   opts: { keepPasswordIfEmpty?: boolean } = { keepPasswordIfEmpty: true }
 ): AppSettings {
@@ -260,7 +307,18 @@ export function updateSettings(
   const runtime = { ...cur.runtime, ...patch.runtime };
   const grind = { ...cur.grind, ...patch.grind };
   const richlist = { ...cur.richlist, ...patch.richlist };
-  return saveSettings({ ...cur, bitcoinRpc: br, fulcrum, rescue, runtime, grind, richlist, updatedAt: null });
+  const kangaroo = { ...cur.kangaroo, ...patch.kangaroo };
+  return saveSettings({
+    ...cur,
+    bitcoinRpc: br,
+    fulcrum,
+    rescue,
+    runtime,
+    grind,
+    richlist,
+    kangaroo,
+    updatedAt: null
+  });
 }
 
 /** Clear Bitcoin RPC credentials (and optional Fulcrum) from disk. */
@@ -437,6 +495,67 @@ export function effectiveGrind(): {
     maxWorkers,
     throttleMs,
     batchScale,
+    source: pickSource(fromSettings, fromEnv)
+  };
+}
+
+/**
+ * Resolved kangaroo backend for the next kangaroo start.
+ * Env: KANGAROO_BACKEND, KANGAROO_JLP_BIN, KANGAROO_JLP_EXTRA, KANGAROO_JLP_GPU,
+ *      KANGAROO_JLP_GPU_ID, KANGAROO_EXTERNAL_CMD.
+ */
+export function effectiveKangaroo(): {
+  backend: KangarooBackend;
+  jlpBin: string;
+  jlpExtraArgs: string;
+  jlpUseGpu: boolean;
+  jlpGpuId: string;
+  externalCmd: string;
+  source: SettingsSource;
+} {
+  const s = loadSettings().kangaroo;
+  const env = (k: string) => (process.env[k] ?? '').trim();
+
+  const backend: KangarooBackend =
+    normalizeKangarooBackend(process.env.KANGAROO_BACKEND) || s.backend || 'cpu';
+  const jlpBin = env('KANGAROO_JLP_BIN') || s.jlpBin;
+  const jlpExtraArgs = env('KANGAROO_JLP_EXTRA') || s.jlpExtraArgs;
+  const jlpGpuId = env('KANGAROO_JLP_GPU_ID') || s.jlpGpuId;
+  const externalCmd = env('KANGAROO_EXTERNAL_CMD') || s.externalCmd;
+
+  // Tri-state: env wins, else the stored value, else default on.
+  let jlpUseGpu = true;
+  if (env('KANGAROO_JLP_GPU')) {
+    jlpUseGpu = /^(1|true|yes|on)$/i.test(env('KANGAROO_JLP_GPU'));
+  } else if (s.jlpUseGpu !== null) {
+    jlpUseGpu = s.jlpUseGpu;
+  }
+
+  const ENV_KEYS = [
+    'KANGAROO_BACKEND',
+    'KANGAROO_JLP_BIN',
+    'KANGAROO_JLP_EXTRA',
+    'KANGAROO_JLP_GPU',
+    'KANGAROO_JLP_GPU_ID',
+    'KANGAROO_EXTERNAL_CMD'
+  ];
+  const fromSettings = !!(
+    s.backend ||
+    s.jlpBin ||
+    s.jlpExtraArgs ||
+    s.jlpGpuId ||
+    s.jlpUseGpu !== null ||
+    s.externalCmd
+  );
+  const fromEnv = ENV_KEYS.some((k) => process.env[k]);
+
+  return {
+    backend,
+    jlpBin,
+    jlpExtraArgs,
+    jlpUseGpu,
+    jlpGpuId,
+    externalCmd,
     source: pickSource(fromSettings, fromEnv)
   };
 }

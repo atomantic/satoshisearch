@@ -1,6 +1,7 @@
 import type { PageServerLoad, Actions } from './$types';
 import { fail } from '@sveltejs/kit';
 import { grinder } from '$server/grinder/engine';
+import { kangaroo } from '$server/grinder/kangaroo-engine';
 import { makeSource, listSources } from '$server/grinder/registry';
 import { matchSetCounts, latestRichlistSnapshot } from '$server/grinder/loadset';
 import { effectiveRescue, effectiveGrind } from '$server/settings';
@@ -14,6 +15,13 @@ export const load: PageServerLoad = async () => {
     vaultReady: grinder.vaultReady,
     sources: listSources(),
     matchSet: matchSetCounts(),
+    kangaroo: kangaroo.status,
+    kangarooTargets: kangaroo.listTargets().map((t) => ({
+      n: t.n,
+      address: t.address,
+      halfBits: t.halfBits,
+      balance: t.balance
+    })),
     grind: {
       pace: grind.pace,
       maxWorkers: grind.maxWorkers,
@@ -51,5 +59,20 @@ export const actions: Actions = {
   stop: async () => {
     await grinder.stop();
     return { stopped: true };
+  },
+  kangarooStart: async ({ request }) => {
+    const data = await request.formData();
+    const n = Number(data.get('puzzle') ?? 0);
+    if (!Number.isFinite(n) || n < 1) return fail(400, { error: 'invalid puzzle number' });
+    try {
+      await kangaroo.start(n);
+      return { kangarooStarted: n };
+    } catch (e) {
+      return fail(400, { error: String(e) });
+    }
+  },
+  kangarooStop: async () => {
+    await kangaroo.stop();
+    return { kangarooStopped: true };
   }
 };

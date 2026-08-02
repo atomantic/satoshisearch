@@ -30,8 +30,9 @@ always queries by **script hash** = `sha256(scriptPubKey)`. Verified: block-1000
 - **SvelteKit + TypeScript**, single Node container (adapter-node).
 - **`node:sqlite`** for storage — zero native database deps.
 - **`@noble/*` / `@scure/*`** for wallet crypto (hashes, base58, BIP32/39, tx signing).
-- **Native grinder** (`native/grinder`, C + [libsecp256k1](https://github.com/bitcoin-core/secp256k1)) for the
-  keys/sec hot loop; falls back to JS workers if the binary is not built.
+- **Native grinder + kangaroo** (`native/grinder`, C + [libsecp256k1](https://github.com/bitcoin-core/secp256k1)):
+  sequential key matching (`satoshi-grind`) and Pollard's kangaroo for exposed-puzzle ECDLP
+  (`satoshi-kangaroo`). Falls back to JS workers for sequential grind if the binary is missing.
 - Talks to any mempool.space-compatible REST API — your local Umbrel node or the public instance.
 
 ## Development
@@ -39,7 +40,8 @@ always queries by **script hash** = `sha256(scriptPubKey)`. Verified: block-1000
 ```sh
 cp .env.example .env          # point MEMPOOL_API_URL at your node
 npm install
-npm run grind:build           # optional but recommended: native libsecp256k1 grinder
+npm run grind:build           # optional but recommended: satoshi-grind + satoshi-kangaroo
+npm run kangaroo:selftest     # Pollard's kangaroo self-check
 npm run index:puzzles         # derive & classify all 256 puzzles from the chain
 npm run richlist:refresh      # fetch ≥1 BTC single-key richlist (loyce) + import
 npm run rescue:check          # pre-flight for a realtime weak-key race
@@ -47,8 +49,9 @@ npm run dev                   # http://localhost:3117
 npm test                      # unit tests (script/P2PK primitives)
 ```
 
-Native grinder needs `cc`, `cmake`, `make`, and `git` once (clones libsecp256k1). Without it the
-app still runs using JS workers (`SATOSHI_GRIND_JS=1` forces that path). See `native/grinder/README.md`.
+Native tools need `cc`, `cmake`, `make`, and `git` once (clones libsecp256k1). Without them the
+app still runs sequential grind via JS workers (`SATOSHI_GRIND_JS=1` forces that path); kangaroo
+requires the native binary. See `native/grinder/README.md` and `docs/KEYSPACE.md`.
 
 For an always-on weak-key race (separate from the UI process):
 

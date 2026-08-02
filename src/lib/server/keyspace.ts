@@ -26,6 +26,17 @@
  */
 import { openDb } from './db';
 
+/**
+ * Effective ECDLP work bits for an exposed puzzle: its range is 2^(n-1) wide and
+ * Pollard's kangaroo needs ~2·√width group ops, i.e. ~2^(n/2).
+ *
+ * The single definition — the keyspace chart and the grinder's kangaroo card
+ * both render this as "effective bits", so they must not compute it separately.
+ */
+export function puzzleHalfBits(n: number): number {
+  return Math.ceil(n / 2);
+}
+
 export interface ReferenceBand {
   label: string;
   bits: number;
@@ -107,7 +118,7 @@ export function analyzeKeyspace(): KeyspaceAnalysis {
     n: r.n,
     bits: r.n,
     balanceSats: r.balance,
-    halfBits: Math.ceil(r.n / 2)
+    halfBits: puzzleHalfBits(r.n)
   }));
   const atRiskSats = atRiskRows.reduce((a, r) => a + r.balance, 0);
 

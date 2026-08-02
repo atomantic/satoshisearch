@@ -9,7 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY native/grinder/ ./
 # third_party may already be present; Makefile clones if missing
-RUN make -j"$(nproc)" && ./satoshi-grind --selftest
+RUN make -j"$(nproc)" \
+  && ./satoshi-grind --selftest \
+  && ./satoshi-kangaroo --selftest
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
@@ -31,6 +33,7 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/datasets ./datasets
 COPY --from=build /app/src/lib/server/grinder/worker.mjs ./build/worker.mjs
 COPY --from=grind-build /src/satoshi-grind ./build/satoshi-grind
+COPY --from=grind-build /src/satoshi-kangaroo ./build/satoshi-kangaroo
 
 # Persisted DB + vault live here; mounted as a volume by Umbrel.
 RUN mkdir -p /app/data

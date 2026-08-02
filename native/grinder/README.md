@@ -53,6 +53,20 @@ Length-prefixed little-endian frames on stdin/stdout. See
 
 Puzzle-range and low-entropy sources use `RANGE` automatically when the binary is present.
 
+## satoshi-kangaroo
+
+Second binary in this directory: **Pollard's kangaroo** for interval ECDLP when a puzzle pubkey is
+known. Same libsecp256k1 build; multi-threaded tame/wild herds + distinguished points.
+
+```sh
+make -C native/grinder                    # both binaries
+./native/grinder/satoshi-kangaroo --selftest
+./native/grinder/satoshi-kangaroo --pubkey 02… --lo <hex> --hi <hex> --threads 8
+```
+
+JSON-line events on stdout (`progress` / `found` / `exhausted` / `cancelled`). Node wraps this via
+`src/lib/server/grinder/kangaroo-backends.ts` and the Grinder UI.
+
 ## Expected speed
 
 Rough order of magnitude on a modern multi-core Mac (Apple Silicon):

@@ -9,14 +9,11 @@
 import { openDb, nowSec } from '../db';
 import type { Bucket } from '../config';
 import { mayAutoSweep, effectiveGrind, type GrindPace } from '../settings';
-import { scriptForTarget } from '../script';
-import { scriptBalance } from '../mempool';
 import { GrinderPool, coldcardWorkerCfg } from './pool';
 import { loadMatchSet, findTargetByMatch } from './loadset';
-import { encryptKey, isVaultConfigured } from '../rescue/vault';
+import { recordHit } from './hit';
+import { isVaultConfigured } from '../rescue/vault';
 import { audit } from '../rescue/audit';
-import { handleHit } from '../rescue/sweeper';
-import { notifyRescue } from '../rescue/notify';
 import type { GrindSource, SpaceKind } from './sources';
 import type { Match } from './matchset';
 import { generateColdcardSeeds, type RngSpaceModel } from './coldcard';
@@ -307,96 +304,17 @@ class GrinderEngine {
   }
 
   private async recordHit(source: GrindSource, m: Match): Promise<void> {
-    const db = openDb();
-    const target = findTargetByMatch(m.matched, m.kind);
-
-    // Snapshot balance from the richlist/index (may be a day old); live node is truth.
-    const snapshotBalance = target?.last_balance ?? null;
-    const script = target ? scriptForTarget(target) : null;
-    let liveBalance: number | null = null;
-    if (script) {
-      try {
-        liveBalance = await scriptBalance(script);
-      } catch {
-        liveBalance = null;
-      }
-    }
-    // Prefer live when available; fall back to snapshot for audit/context only.
-    // Sweeper still re-fetches UTXOs before any broadcast.
-    const balance = liveBalance ?? snapshotBalance ?? 0;
-
-    audit('hit-found', {
-      source: source.name,
-      bucket: source.bucket,
-      origin: m.origin,
-      matchKind: m.kind,
-      matched: m.matched,
-      address: target?.address ?? null,
-      dataset: target?.dataset ?? null,
-      balanceSats: balance,
-      snapshotBalanceSats: snapshotBalance,
-      liveBalanceSats: liveBalance,
-      balanceSource: liveBalance !== null ? 'live' : snapshotBalance !== null ? 'snapshot' : 'none'
-    });
-
-    // Encrypt and store the key. If the vault isn't configured we still record
-    // the hit's existence in the audit log, but never persist plaintext.
-    let privEnc = '';
-    try {
-      privEnc = encryptKey(m.privHex);
-    } catch (e) {
-      audit('hit-store-failed', { origin: m.origin, reason: String(e) });
-    }
-
-    const hitId = (
-      db
-        .prepare(
-          `INSERT INTO hit (target_id, source_name, bucket, found_at, address, privkey_enc, balance_at_find, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'held') RETURNING id`
-        )
-        .get(
-          target?.id ?? null,
-          source.name,
-          source.bucket,
-          nowSec(),
-          target?.address ?? null,
-          privEnc || 'UNSTORED',
-          balance
-        ) as { id: number }
-    ).id;
-
-    // File the owner-claim record so funds can be returned later.
-    db.prepare(
-      `INSERT INTO claim (hit_id, original_address, original_script, balance, discovery_method, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(hitId, target?.address ?? null, script, balance, m.origin, nowSec());
-
-    // Hand off to the sweeper, which enforces policy (bucket, attestation,
-    // dust, dry-run, destination) and updates the hit status.
-    const decision = await handleHit(
-      hitId,
-      source.bucket as Bucket,
-      balance,
-      m.privHex,
-      target,
-      privEnc !== ''
+    await recordHit(
+      {
+        sourceName: source.name,
+        bucket: source.bucket as Bucket,
+        origin: m.origin,
+        matchKind: m.kind,
+        matched: m.matched,
+        privHex: m.privHex
+      },
+      findTargetByMatch(m.matched, m.kind)
     );
-
-    // Realtime ops: webhook / notify file / shell hook (best-effort).
-    void notifyRescue({
-      event: 'hit-found',
-      ts: nowSec(),
-      source: source.name,
-      bucket: source.bucket,
-      origin: m.origin,
-      address: target?.address ?? null,
-      balanceSats: balance,
-      matchKind: m.kind,
-      status: decision.action,
-      action: decision.action,
-      reason: decision.reason,
-      txid: decision.txid ?? null
-    });
   }
 
   requestStop(): void {
