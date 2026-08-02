@@ -1,11 +1,23 @@
 /**
  * Build the in-memory match-set from the indexed targets. hash160s come from
- * every dataset that has one (coinbase, richlist, puzzle P2PKH); pubkeys come
- * from P2PK targets (early coinbase, exposed puzzles) so the grinder can match a
- * bare public key directly.
+ * every dataset that has one (coinbase, richlist, puzzle P2PKH/P2WPKH); pubkeys
+ * come from P2PK targets (early coinbase, exposed puzzles) so the grinder can
+ * match a bare public key directly.
  */
 import { openDb } from '../db';
 import { emptyMatchSet, type MatchSet } from './matchset';
+
+/**
+ * Count distinct match keys without materializing them. The grinder page only
+ * renders sizes; building two ~1M-entry Sets to read `.size` is pure waste.
+ */
+export function matchSetCounts(): { hash160s: number; pubkeys: number; size: number } {
+  const db = openDb();
+  const one = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+  const hash160s = one(`SELECT COUNT(DISTINCT hash160) n FROM target WHERE hash160 IS NOT NULL`);
+  const pubkeys = one(`SELECT COUNT(DISTINCT pubkey) n FROM target WHERE pubkey IS NOT NULL`);
+  return { hash160s, pubkeys, size: hash160s + pubkeys };
+}
 
 export function loadMatchSet(): MatchSet {
   const db = openDb();
@@ -21,19 +33,48 @@ export function loadMatchSet(): MatchSet {
   return set;
 }
 
+export type TargetMatch = {
+  id: number;
+  address: string;
+  script_hex: string | null;
+  script_type: string | null;
+  hash160: string | null;
+  dataset: string;
+  last_balance: number | null;
+};
+
 /** Resolve a match back to its target row (for balance + address + claim). */
-export function findTargetByMatch(
-  matched: string,
-  kind: string
-): { id: number; address: string; script_hex: string | null; hash160: string | null; dataset: string } | null {
+export function findTargetByMatch(matched: string, kind: string): TargetMatch | null {
   const db = openDb();
   const col = kind === 'pubkey' ? 'pubkey' : 'hash160';
   const row = db
     .prepare(
-      `SELECT id, address, script_hex, hash160, dataset FROM target WHERE ${col} = ? COLLATE NOCASE LIMIT 1`
+      `SELECT id, address, script_hex, script_type, hash160, dataset, last_balance
+       FROM target WHERE ${col} = ? COLLATE NOCASE LIMIT 1`
     )
-    .get(matched) as
-    | { id: number; address: string; script_hex: string | null; hash160: string | null; dataset: string }
-    | undefined;
+    .get(matched) as TargetMatch | undefined;
+  return row ?? null;
+}
+
+export type RichlistSnapshot = {
+  id: number;
+  source: string;
+  created_at: number;
+  tip_height: number | null;
+  min_sats: number;
+  script_policy: string;
+  row_count: number | null;
+  note: string | null;
+};
+
+/** Latest richlist snapshot metadata, if any. */
+export function latestRichlistSnapshot(): RichlistSnapshot | null {
+  const db = openDb();
+  const row = db
+    .prepare(
+      `SELECT id, source, created_at, tip_height, min_sats, script_policy, row_count, note
+       FROM richlist_snapshot ORDER BY id DESC LIMIT 1`
+    )
+    .get() as RichlistSnapshot | undefined;
   return row ?? null;
 }

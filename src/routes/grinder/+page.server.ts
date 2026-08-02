@@ -2,21 +2,39 @@ import type { PageServerLoad, Actions } from './$types';
 import { fail } from '@sveltejs/kit';
 import { grinder } from '$server/grinder/engine';
 import { makeSource, listSources } from '$server/grinder/registry';
-import { loadMatchSet } from '$server/grinder/loadset';
-import { config } from '$server/config';
+import { matchSetCounts, latestRichlistSnapshot } from '$server/grinder/loadset';
+import { effectiveRescue, effectiveGrind } from '$server/settings';
 
 export const load: PageServerLoad = async () => {
-  const set = loadMatchSet();
+  const snap = latestRichlistSnapshot();
+  const rescue = effectiveRescue();
+  const grind = effectiveGrind();
   return {
     status: grinder.status,
     vaultReady: grinder.vaultReady,
     sources: listSources(),
-    matchSet: { hash160s: set.hash160s.size, pubkeys: set.pubkeys.size, size: set.size },
+    matchSet: matchSetCounts(),
+    grind: {
+      pace: grind.pace,
+      maxWorkers: grind.maxWorkers,
+      throttleMs: grind.throttleMs
+    },
+    richlistSnapshot: snap
+      ? {
+          source: snap.source,
+          createdAt: snap.created_at,
+          tipHeight: snap.tip_height,
+          minSats: snap.min_sats,
+          scriptPolicy: snap.script_policy,
+          rowCount: snap.row_count,
+          note: snap.note
+        }
+      : null,
     policy: {
-      dryRun: config.rescue.dryRun,
-      autoBuckets: [...config.rescue.autoBuckets],
-      whitehatAttested: config.rescue.whitehatAttested,
-      destConfigured: !!config.rescue.destAddress
+      dryRun: rescue.dryRun,
+      autoBuckets: [...rescue.autoBuckets],
+      whitehatAttested: rescue.whitehatAttested,
+      destConfigured: !!rescue.destAddress
     }
   };
 };

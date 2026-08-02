@@ -127,7 +127,21 @@ const MIGRATIONS: string[] = [
   )`,
 
   // 9 — kv: small key/value for singletons (schema version handled separately).
-  `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)`
+  `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)`,
+
+  // 10 — richlist_snapshot: provenance for balance-aware richlist imports.
+  `CREATE TABLE IF NOT EXISTS richlist_snapshot (
+    id            INTEGER PRIMARY KEY,
+    source        TEXT NOT NULL,     -- core-utxo | loyce | file
+    created_at    INTEGER NOT NULL,
+    tip_height    INTEGER,
+    tip_hash      TEXT,
+    min_sats      INTEGER NOT NULL,
+    script_policy TEXT NOT NULL,
+    row_count     INTEGER,
+    file_path     TEXT,
+    note          TEXT
+  )`
 ];
 
 export function openDb(): DatabaseSync {

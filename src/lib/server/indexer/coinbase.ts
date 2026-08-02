@@ -11,7 +11,7 @@
  * The run is resumable by height cursor via the scan_run table.
  */
 import { openDb, nowSec } from '../db';
-import { config } from '../config';
+import { effectiveRuntime } from '../settings';
 import { classifyScript, scriptHash } from '../script';
 import { blockHashAtHeight, coinbaseTxid, getTx, tipHeight, mapPool } from '../mempool';
 
@@ -31,7 +31,7 @@ function lastIndexedHeight(): number {
 }
 
 export async function indexCoinbase(
-  maxHeight = config.coinbaseMaxHeight,
+  maxHeight = effectiveRuntime().coinbaseMaxHeight,
   onProgress?: (p: CoinbaseProgress) => void
 ): Promise<{ indexed: number; from: number; to: number }> {
   const db = openDb();
