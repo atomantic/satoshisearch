@@ -2,7 +2,8 @@ import type { PageServerLoad, Actions } from './$types';
 import { openDb } from '$server/db';
 import { recentAudit, verifyAudit } from '$server/rescue/audit';
 import { isVaultConfigured } from '$server/rescue/vault';
-import { config } from '$server/config';
+import { assessRescueReadiness } from '$server/rescue/readiness';
+import { effectiveRescue } from '$server/settings';
 import { addressLink, txLink } from '$server/links';
 
 export const load: PageServerLoad = async () => {
@@ -38,6 +39,8 @@ export const load: PageServerLoad = async () => {
 
   const verification = verifyAudit();
   const audit = recentAudit(60);
+  const rescue = effectiveRescue();
+  const readiness = assessRescueReadiness({ primaryBucket: 'coldcard' });
 
   return {
     hits: hits.map((h) => ({
@@ -49,12 +52,22 @@ export const load: PageServerLoad = async () => {
     verification,
     audit,
     vaultReady: isVaultConfigured(),
+    readiness: {
+      canGrind: readiness.canGrind,
+      canDryRunSweep: readiness.canDryRunSweep,
+      canLiveSweep: readiness.canLiveSweep,
+      matchSetSize: readiness.matchSetSize,
+      richlistAgeHours: readiness.richlistAgeHours,
+      nativeGrind: readiness.nativeGrind,
+      primaryBucket: readiness.primaryBucket,
+      checks: readiness.checks
+    },
     policy: {
-      dryRun: config.rescue.dryRun,
-      dest: config.rescue.destAddress,
-      autoBuckets: [...config.rescue.autoBuckets],
-      whitehatAttested: config.rescue.whitehatAttested,
-      dustSats: config.rescue.dustSats
+      dryRun: rescue.dryRun,
+      dest: rescue.destAddress,
+      autoBuckets: [...rescue.autoBuckets],
+      whitehatAttested: rescue.whitehatAttested,
+      dustSats: rescue.dustSats
     }
   };
 };

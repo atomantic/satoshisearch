@@ -52,6 +52,35 @@
   </div>
 </div>
 
+<div class="card readiness">
+  <div class="k">Realtime rescue readiness · bucket {data.readiness.primaryBucket}</div>
+  <div class="ready-flags">
+    <span class="flag" class:ok={data.readiness.canGrind} class:bad={!data.readiness.canGrind}>
+      grind {data.readiness.canGrind ? 'ready' : 'blocked'}
+    </span>
+    <span class="flag" class:ok={data.readiness.canDryRunSweep} class:bad={!data.readiness.canDryRunSweep}>
+      dry-run sweep {data.readiness.canDryRunSweep ? 'ready' : 'no'}
+    </span>
+    <span class="flag" class:ok={data.readiness.canLiveSweep} class:warn={!data.readiness.canLiveSweep && data.readiness.canDryRunSweep} class:bad={!data.readiness.canDryRunSweep}>
+      live sweep {data.readiness.canLiveSweep ? 'ARMED' : 'safe (off)'}
+    </span>
+  </div>
+  <ul class="checks">
+    {#each data.readiness.checks as c}
+      <li class={c.level}>
+        <span class="lvl">{c.level}</span>
+        <span class="lab">{c.label}</span>
+        <span class="det faint">{c.detail}</span>
+      </li>
+    {/each}
+  </ul>
+  <p class="faint small">
+    CLI: <span class="mono">npm run rescue:check</span>
+    · runner: <span class="mono">npm run rescue:run -- --source coldcard --resume</span>
+    · see <span class="mono">docs/RESCUE-RUNNER.md</span>
+  </p>
+</div>
+
 {#if data.hits.length}
   <div class="card">
     <div class="k">Recovered keys &amp; claims</div>
@@ -113,6 +142,32 @@
   .stat.danger { border-color: rgba(255, 87, 87, 0.4); }
   .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-soft); margin-bottom: 8px; }
   .policy { margin-bottom: 16px; }
+  .readiness { margin-bottom: 16px; }
+  .ready-flags { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .flag {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+  }
+  .flag.ok { color: var(--success); background: rgba(123, 255, 160, 0.12); }
+  .flag.warn { color: var(--warning); background: rgba(255, 155, 61, 0.12); }
+  .flag.bad { color: var(--danger); background: rgba(255, 87, 87, 0.12); }
+  .checks { list-style: none; padding: 0; margin: 0 0 10px; }
+  .checks li {
+    display: grid;
+    grid-template-columns: 48px 140px 1fr;
+    gap: 8px;
+    font-size: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  }
+  .checks .lvl { font-family: var(--mono); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; }
+  .checks li.ok .lvl { color: var(--success); }
+  .checks li.warn .lvl { color: var(--warning); }
+  .checks li.fail .lvl { color: var(--danger); }
+  .checks .lab { color: var(--text); }
   .pgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 24px; font-size: 13px; }
   .pgrid b { color: var(--text); }
   .r { text-align: right; }

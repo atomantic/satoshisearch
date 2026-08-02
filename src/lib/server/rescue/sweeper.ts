@@ -17,8 +17,9 @@ import { hex } from '@scure/base';
 import * as btc from '@scure/btc-signer';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { openDb, nowSec } from '../db';
-import { config, mayAutoSweep, type Bucket } from '../config';
-import { classifyScript, p2pkhScript, hash160, bytesToHex, hexToBytes } from '../script';
+import type { Bucket } from '../config';
+import { effectiveRescue, mayAutoSweep } from '../settings';
+import { classifyScript, scriptForTarget, hash160, bytesToHex, hexToBytes } from '../script';
 import { recommendedFees, broadcastTx, scriptUtxos, getTxHex } from '../mempool';
 import { audit } from './audit';
 
@@ -26,6 +27,7 @@ interface TargetInfo {
   id: number;
   address: string;
   script_hex: string | null;
+  script_type?: string | null;
   hash160: string | null;
   dataset: string;
 }
@@ -57,7 +59,7 @@ export async function handleHit(
   if (decision.txid) {
     db.prepare(`UPDATE claim SET sweep_txid=?, dest_address=?, resolved_at=? WHERE hit_id=?`).run(
       decision.txid,
-      config.rescue.destAddress,
+      effectiveRescue().destAddress,
       nowSec(),
       hitId
     );
@@ -81,10 +83,11 @@ async function decide(
   privHex: string,
   target: TargetInfo | null
 ): Promise<SweepDecision> {
+  const rescue = effectiveRescue();
   if (balance <= 0) return { action: 'held', reason: 'no balance' };
-  if (balance < config.rescue.dustSats)
-    return { action: 'held', reason: `below dust floor (${config.rescue.dustSats} sats)` };
-  if (!config.rescue.destAddress)
+  if (balance < rescue.dustSats)
+    return { action: 'held', reason: `below dust floor (${rescue.dustSats} sats)` };
+  if (!rescue.destAddress)
     return { action: 'held', reason: 'no rescue destination configured (fail-safe hold)' };
   if (!mayAutoSweep(bucket)) {
     const why =
@@ -105,7 +108,7 @@ async function decide(
     return { action: 'held', reason: `tx build failed: ${String(e)}` };
   }
 
-  if (config.rescue.dryRun) {
+  if (rescue.dryRun) {
     return { action: 'dry-run', reason: 'SWEEP_DRY_RUN is on; signed but not broadcast', txid };
   }
 
@@ -136,7 +139,7 @@ async function buildSweepTx(
   target: TargetInfo | null
 ): Promise<{ hex: string; txid: string }> {
   if (!target) throw new Error('no target for matched key');
-  const script = target.script_hex ?? (target.hash160 ? p2pkhScript(target.hash160) : null);
+  const script = scriptForTarget(target);
   if (!script) throw new Error('cannot determine source script');
 
   const cls = classifyScript(script);
@@ -184,7 +187,7 @@ async function buildSweepTx(
   const sendValue = total - fee;
   if (sendValue <= 0) throw new Error('fee exceeds balance');
 
-  tx.addOutputAddress(config.rescue.destAddress, BigInt(sendValue), btc.NETWORK);
+  tx.addOutputAddress(effectiveRescue().destAddress, BigInt(sendValue), btc.NETWORK);
   tx.sign(priv);
   tx.finalize();
   return { hex: hex.encode(tx.extract()), txid: tx.id };

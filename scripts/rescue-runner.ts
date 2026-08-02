@@ -1,0 +1,201 @@
+#!/usr/bin/env tsx
+/**
+ * Realtime rescue runner — long-lived process for weak-key races.
+ *
+ * Usage:
+ *   npx tsx scripts/rescue-runner.ts check
+ *   npx tsx scripts/rescue-runner.ts run --source coldcard
+ *   npx tsx scripts/rescue-runner.ts run --source coldcard --require-live
+ *   npx tsx scripts/rescue-runner.ts run --source brainwallet --refresh-hours 12
+ *
+ * Does not replace the web UI; shares DATA_DIR SQLite for hits/audit/match-set.
+ * Start the UI separately for monitoring, or tail RESCUE_NOTIFY_FILE / webhook.
+ *
+ * Policy remains enforced by the sweeper — this only keeps grind + readiness alive.
+ */
+import { spawn } from 'node:child_process';
+import { assessRescueReadiness, formatReadiness } from '../src/lib/server/rescue/readiness.ts';
+import { notifyRescue } from '../src/lib/server/rescue/notify.ts';
+import { grinder } from '../src/lib/server/grinder/engine.ts';
+import { makeSource } from '../src/lib/server/grinder/registry.ts';
+import { openDb } from '../src/lib/server/db.ts';
+
+function arg(name: string, dflt?: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  if (i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('-')) return process.argv[i + 1];
+  return dflt;
+}
+
+function hasFlag(name: string): boolean {
+  return process.argv.includes(name);
+}
+
+function usage(): never {
+  console.log(`Usage:
+  rescue-runner check [--bucket coldcard]
+  rescue-runner run --source <id> [options]
+
+Sources: coldcard | brainwallet | lowentropy | puzzle-71 | puzzle-72 | constants-pi | …
+
+Options:
+  --bucket <name>       Policy bucket for readiness (default: source bucket / coldcard)
+  --require-live        Abort unless live auto-sweep is fully armed
+  --require-dry-run     Abort unless dry-run sweep path is ready (dest + bucket + vault warn ok)
+  --refresh-hours <n>   Re-run richlist:refresh when snapshot older than n hours (0=never)
+  --status-sec <n>      Status print interval (default 15)
+  --resume              Resume from last DB cursor for this source name
+`);
+  process.exit(1);
+}
+
+async function refreshRichlist(): Promise<void> {
+  console.log('[runner] refreshing richlist (loyce fetch + import)…');
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('npm', ['run', 'richlist:refresh'], {
+      cwd: process.cwd(),
+      stdio: 'inherit',
+      env: process.env
+    });
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`richlist:refresh exit ${code}`))));
+  });
+}
+
+function lastCursor(sourceName: string): bigint {
+  try {
+    const row = openDb()
+      .prepare(`SELECT cursor FROM grind_source WHERE name=?`)
+      .get(sourceName) as { cursor: string } | undefined;
+    if (row?.cursor) return BigInt(row.cursor);
+  } catch {
+    /* empty */
+  }
+  return 0n;
+}
+
+async function cmdCheck(bucket: string): Promise<void> {
+  const r = assessRescueReadiness({ primaryBucket: bucket });
+  console.log(formatReadiness(r));
+  process.exit(r.canGrind ? 0 : 2);
+}
+
+async function cmdRun(): Promise<void> {
+  const sourceId = arg('--source');
+  if (!sourceId) usage();
+
+  const source = makeSource(sourceId!);
+  if (!source) {
+    console.error(`Unknown or unavailable source: ${sourceId}`);
+    process.exit(1);
+  }
+
+  const bucket = arg('--bucket', source.bucket) ?? source.bucket;
+  const requireLive = hasFlag('--require-live');
+  const requireDry = hasFlag('--require-dry-run');
+  const refreshHours = Number(arg('--refresh-hours', '0') ?? '0');
+  const statusSec = Number(arg('--status-sec', '15') ?? '15');
+  const resume = hasFlag('--resume');
+
+  let readiness = assessRescueReadiness({ primaryBucket: bucket });
+  console.log(formatReadiness(readiness));
+  console.log('');
+
+  if (!readiness.canGrind) {
+    console.error('[runner] cannot grind — fix FAIL items above');
+    process.exit(2);
+  }
+  if (requireLive && !readiness.canLiveSweep) {
+    console.error('[runner] --require-live but live sweep not armed');
+    process.exit(2);
+  }
+  if (requireDry && !readiness.canDryRunSweep) {
+    console.error('[runner] --require-dry-run but dry-run sweep path incomplete');
+    process.exit(2);
+  }
+
+  if (refreshHours > 0) {
+    const age = readiness.richlistAgeHours;
+    if (age === null || age > refreshHours) {
+      try {
+        await refreshRichlist();
+        readiness = assessRescueReadiness({ primaryBucket: bucket });
+        console.log('[runner] match-set after refresh:', readiness.matchSetSize);
+      } catch (e) {
+        console.error('[runner] richlist refresh failed:', e);
+        if (readiness.matchSetSize === 0) process.exit(2);
+        console.error('[runner] continuing with existing match-set');
+      }
+    }
+  }
+
+  const cursor = resume ? lastCursor(source.name) : 0n;
+  console.log(
+    `[runner] starting source=${source.name} bucket=${source.bucket} spaceBits=${source.spaceBits.toFixed(1)} cursor=${cursor} resume=${resume}`
+  );
+
+  await notifyRescue({
+    event: 'rescue-runner',
+    ts: Math.floor(Date.now() / 1000),
+    message: `start ${source.name}`,
+    source: source.name,
+    bucket: source.bucket
+  });
+
+  await grinder.start(source, cursor);
+
+  const stop = async (sig: string) => {
+    console.log(`\n[runner] ${sig} — stopping grind…`);
+    await grinder.stop();
+    await notifyRescue({
+      event: 'rescue-runner',
+      ts: Math.floor(Date.now() / 1000),
+      message: `stop ${sig}`,
+      source: source.name,
+      bucket: source.bucket
+    });
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void stop('SIGINT'));
+  process.on('SIGTERM', () => void stop('SIGTERM'));
+
+  let lastRefresh = Date.now();
+  // Status loop — grind runs in background on the engine; we just report.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, statusSec * 1000));
+    const st = grinder.status;
+    const rate =
+      st.spaceKind === 'rng-states'
+        ? `${st.seedsPerSec ?? 0} states/s · ${st.seedsTried ?? 0} states · ${st.keysTried} keys`
+        : `${st.keysPerSec} keys/s · ${st.keysTried} keys`;
+    console.log(
+      `[runner] ${st.running ? 'RUN' : 'IDLE'} ${st.sourceName ?? '—'} · ${rate} · hits=${st.hits} · backend=${st.backend} · workers=${st.workers}`
+    );
+
+    if (!st.running) {
+      console.log('[runner] grind finished or stopped');
+      break;
+    }
+
+    // Optional periodic richlist refresh (restarts grind so match-set reloads).
+    if (refreshHours > 0 && Date.now() - lastRefresh > refreshHours * 3600_000) {
+      console.log('[runner] scheduled richlist refresh — restarting grind with new match-set');
+      await grinder.stop();
+      try {
+        await refreshRichlist();
+      } catch (e) {
+        console.error('[runner] refresh failed, resuming with old set:', e);
+      }
+      lastRefresh = Date.now();
+      const cur = lastCursor(source.name);
+      await grinder.start(source, cur);
+    }
+  }
+}
+
+const cmd = process.argv[2];
+if (cmd === 'check') {
+  await cmdCheck(arg('--bucket', 'coldcard') ?? 'coldcard');
+} else if (cmd === 'run') {
+  await cmdRun();
+} else {
+  usage();
+}

@@ -63,3 +63,9 @@ vault for manual review.
 The definition of a weak-key class (for example the exact ColdCard PRNG state space) is a
 dual-use artifact: it helps a rescuer and an attacker equally. Keep such models in local
 configuration, not in a public repository.
+
+## Realtime operations
+
+For always-on grind + readiness + hit notifications (separate from the web UI process), see
+[RESCUE-RUNNER.md](./RESCUE-RUNNER.md). Policy gates above still apply; the runner never
+bypasses `mayAutoSweep` / dry-run.

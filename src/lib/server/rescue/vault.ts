@@ -8,21 +8,21 @@
  * dangerous to persist in plaintext, so we refuse rather than degrade.
  */
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { config } from '../config';
+import { effectiveVaultKeyHex } from '../settings';
 
 function vaultKey(): Buffer {
-  const hex = config.rescue.vaultKeyHex;
+  const hex = effectiveVaultKeyHex();
   if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
     throw new Error(
-      'VAULT_KEY_HEX is not set to a 32-byte hex key. Recovered keys cannot be stored safely. ' +
-        'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+      'No 32-byte vault key configured. Recovered keys cannot be stored safely. ' +
+        'Generate one from Settings, or set VAULT_KEY_HEX: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
     );
   }
   return Buffer.from(hex, 'hex');
 }
 
 export function isVaultConfigured(): boolean {
-  return /^[0-9a-fA-F]{64}$/.test(config.rescue.vaultKeyHex);
+  return /^[0-9a-fA-F]{64}$/.test(effectiveVaultKeyHex());
 }
 
 /** Encrypt a private key hex string → `iv:tag:ct` hex triple. */
