@@ -176,20 +176,37 @@ function pumpLines(stream: NodeJS.ReadableStream | null, onLine: (line: string) 
   });
 }
 
+/**
+ * Signal the runner's whole process group, not just the process we spawned.
+ *
+ * Runners are shells that fan out to grandchildren — the remote-GPU wrapper's
+ * real work happens in an `ssh` two levels down. Signalling only the direct
+ * child leaves those behind: SIGKILL does not cascade, so the orphaned ssh
+ * holds its channel open and the remote kangaroo keeps burning the GPU while
+ * the next run competes with it. The spawns pass `detached` so a group exists
+ * to aim at; fall back to the bare child if the group is already gone.
+ */
+function signalGroup(proc: ChildProcess, sig: NodeJS.Signals): void {
+  try {
+    if (proc.pid) process.kill(-proc.pid, sig);
+    else proc.kill(sig);
+  } catch {
+    try {
+      proc.kill(sig);
+    } catch {
+      /* already dead */
+    }
+  }
+}
+
 /** SIGTERM, then SIGKILL if the child is still alive after `graceMs`. */
 function killSoftThenHard(proc: ChildProcess, graceMs: number): void {
-  try {
-    proc.kill('SIGTERM');
-    setTimeout(() => {
-      try {
-        proc.kill('SIGKILL');
-      } catch {
-        /* already dead */
-      }
-    }, graceMs).unref?.();
-  } catch {
-    /* ignore */
-  }
+  signalGroup(proc, 'SIGTERM');
+  setTimeout(() => {
+    if (proc.exitCode === null && proc.signalCode === null) {
+      signalGroup(proc, 'SIGKILL');
+    }
+  }, graceMs).unref?.();
 }
 
 /* ---- JSONL stream parser (cpu + external) ------------------------------ */
@@ -317,7 +334,7 @@ function runCpu(opts: KangarooSolveOpts): Run {
   if (opts.dpBits && opts.dpBits > 0) args.push('--dp', String(opts.dpBits));
   if (opts.maxOps && opts.maxOps > 0) args.push('--max-ops', String(opts.maxOps));
 
-  const proc = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
   return attachJsonlProcess(proc, opts, 'satoshi-kangaroo');
 }
 
@@ -386,6 +403,9 @@ function runExternal(opts: KangarooSolveOpts): Run {
   }
   const proc = spawn(argv[0], argv.slice(1), {
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Own process group so cancelling reaches the wrapper's ssh, not just the
+    // wrapper — see signalGroup().
+    detached: true,
     env: {
       ...process.env,
       KANGAROO_PUBKEY: vars.pubkey,
@@ -497,6 +517,7 @@ function runJlp(opts: KangarooSolveOpts): Run {
   const proc = spawn(bin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     cwd: workDir,
+    detached: true,
     env: { ...process.env }
   });
 

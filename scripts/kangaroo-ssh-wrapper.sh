@@ -175,9 +175,17 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     found_priv="$(pad_priv "${BASH_REMATCH[1]}")"
     break
   fi
+# -tt forces a pty for the streaming session, which is what actually stops the
+# remote job. Closing the channel alone leaves the kangaroo running, and the
+# cleanup trap cannot be relied on: the engine SIGKILLs this script two seconds
+# after SIGTERM, while a trap cannot run until the blocked `read` below returns
+# (up to one progress interval) and then needs an ssh round trip of its own. A
+# controlling terminal makes the remote take SIGHUP the moment the connection
+# drops, even if we are killed outright.
+#
 # The status write is best-effort: a signal tears down WORKDIR from the trap
 # while this subshell is still winding down, and a failed write must not print.
-done < <({ ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$REMOTE_CMD" 2>&1; { echo $? >"$RC_FILE"; } 2>/dev/null; })
+done < <({ ssh -tt "${SSH_OPTS[@]}" "$SSH_HOST" "$REMOTE_CMD" 2>&1; { echo $? >"$RC_FILE"; } 2>/dev/null; })
 # PIPESTATUS here would describe the while loop, not the ssh inside the process
 # substitution, so every failure used to be reported as a clean "exhausted".
 # Prefer the remote kangaroo's own code; fall back to ssh's for transport errors.

@@ -315,3 +315,19 @@ class KangarooEngine {
 }
 
 export const kangaroo = new KangarooEngine();
+
+/**
+ * Runners are spawned into their own process group so that cancelling reaches
+ * the remote-GPU wrapper's ssh and not just the wrapper. The trade-off is that
+ * they no longer inherit the terminal's Ctrl-C, so shutting the server down has
+ * to stop them explicitly — otherwise restarting the dev server strands a job
+ * on the remote GPU with nothing left to cancel it.
+ */
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(sig, () => {
+    void kangaroo
+      .stop()
+      .catch(() => undefined)
+      .finally(() => process.exit(sig === 'SIGINT' ? 130 : 143));
+  });
+}
