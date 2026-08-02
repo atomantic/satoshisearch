@@ -183,6 +183,12 @@ it launches itself, so an ssh session won't see it. The probe appends that direc
 looking. Kangaroo itself finds CUDA regardless, so a "GPU #0 …" line from `kangaroo -l` is the
 real signal that the host is ready.
 
+Kangaroo separates its progress updates with a bare `\r`, so the wrapper turns them into lines
+on the GPU host using `stdbuf` from GNU coreutils. On a host without it the run still works,
+but updates arrive in ~4KB bursts — roughly a minute of apparent stalling between refreshes.
+Stopping a run kills the remote process explicitly, since closing the SSH channel on its own
+leaves the job holding the GPU.
+
 ## Wire-up checklist
 
 ### GPU host

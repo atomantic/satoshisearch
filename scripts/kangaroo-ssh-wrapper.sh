@@ -59,8 +59,47 @@ pub_e="${pub_e#0X}"
 pub_e="$(printf '%s' "$pub_e" | tr 'A-F' 'a-f')"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ss-kang-ssh.XXXXXX")"
-cleanup() { rm -rf "$WORKDIR"; }
+
+REMOTE_TAG="ss-kangaroo-$$"
+REMOTE_DIR="/tmp/$REMOTE_TAG"
+REMOTE_IN="$REMOTE_DIR/in.txt"
+REMOTE_OUT="$REMOTE_DIR/result.txt"
+
+# The remote kangaroo has no controlling tty, so closing the ssh channel does not
+# reach it — without an explicit kill every Stop leaves a job burning on the GPU
+# and the next run competes with it. Bracketing the first character keeps the
+# pattern from matching the shell sshd spawns to run this very command, which
+# would otherwise kill the session before the kangaroo.
+KILL_PATTERN="[${REMOTE_TAG:0:1}]${REMOTE_TAG:1}"
+
+cleaned=0
+cleanup() {
+  [[ "$cleaned" -eq 1 ]] && return 0
+  cleaned=1
+  rm -rf "$WORKDIR"
+  # rm before pkill: this command line mentions REMOTE_DIR, so the pattern also
+  # matches the shell sshd spawned for the cleanup itself and takes it down —
+  # fine as the last act, fatal to anything sequenced after it.
+  ssh "${SSH_OPTS[@]}" "$SSH_HOST" \
+    "rm -rf '$REMOTE_DIR'; pkill -f '$KILL_PATTERN'" >/dev/null 2>&1 || true
+}
+
+# The engine sends SIGTERM and follows with SIGKILL after a couple of seconds, so
+# the remote teardown has to happen in the handler rather than on the way out.
+# The cancelled event goes first: dying from a trapped signal means the engine
+# sees a plain exit code rather than a signal, so without it a Stop would be
+# reported as a runner that quit without a result.
+on_signal() {
+  local rc="$1" now
+  now=$(($(date +%s) * 1000))
+  printf '{"event":"cancelled","ops":%s,"elapsedMs":%s}\n' \
+    "${last_ops:-0}" "$((now - ${t0_ms:-$now}))"
+  cleanup
+  exit "$rc"
+}
 trap cleanup EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM HUP
 
 IN_LOCAL="$WORKDIR/in.txt"
 {
@@ -69,20 +108,29 @@ IN_LOCAL="$WORKDIR/in.txt"
   printf '%s\n' "$pub_e"
 } >"$IN_LOCAL"
 
-REMOTE_DIR="/tmp/ss-kangaroo-$$"
-REMOTE_IN="$REMOTE_DIR/in.txt"
-REMOTE_OUT="$REMOTE_DIR/result.txt"
-
 ssh "${SSH_OPTS[@]}" "$SSH_HOST" "mkdir -p '$REMOTE_DIR'"
 scp "${SSH_OPTS[@]}" -q "$IN_LOCAL" "$SSH_HOST:$REMOTE_IN"
 
 # -t 0 = GPU-only. EXTRA unquoted so operators can pass multiple flags.
-REMOTE_CMD="$REMOTE_BIN -t 0 -gpu -gpuId $GPU_ID -o $REMOTE_OUT $EXTRA $REMOTE_IN"
+KANG_CMD="$REMOTE_BIN -t 0 -gpu -gpuId $GPU_ID -o $REMOTE_OUT $EXTRA $REMOTE_IN"
+
+# JLP separates progress updates with a bare \r, so they have to become newlines
+# before the read loop below sees them — and that conversion must happen on the
+# remote, unbuffered. Running `tr` locally block-buffers ~4KB, which at ~110
+# bytes per update is over a minute of total silence before the first line
+# arrives, so the UI just sits at 0/s. stdbuf ships with GNU coreutils; fall
+# back to plain tr where it is missing (buffered, but no worse than before).
+#
+# The remote exit code rides back in-band: the pipeline's own status would be
+# tr's, and enabling pipefail would depend on the login shell being bash.
+REMOTE_CMD="{ $KANG_CMD; echo \"__SS_RC__\$?\"; } 2>&1 | { command -v stdbuf >/dev/null 2>&1 && exec stdbuf -o0 tr '\\r' '\\n'; exec tr '\\r' '\\n'; }"
 
 t0_ms=$(($(date +%s) * 1000))
 last_ops=0
 found_priv=""
 ssh_rc=0
+remote_rc=""
+RC_FILE="$WORKDIR/ssh.rc"
 
 emit_progress() {
   local ops="$1" rate="$2" elapsed="$3"
@@ -97,9 +145,13 @@ pad_priv() {
 }
 
 # Process substitution keeps variables in this shell (not a pipe subshell).
-# tr converts JLP \r progress updates into lines.
 set +e
 while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "$line" =~ __SS_RC__([0-9]+) ]]; then
+    remote_rc="${BASH_REMATCH[1]}"
+    continue
+  fi
+
   if [[ "$line" =~ \[([0-9.]+)[[:space:]]*M(Key|K)/s\] ]]; then
     rate_raw="${BASH_REMATCH[1]}"
     rate="$(awk -v r="$rate_raw" 'BEGIN{printf "%.0f", r*1e6}')"
@@ -123,8 +175,18 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     found_priv="$(pad_priv "${BASH_REMATCH[1]}")"
     break
   fi
-done < <(ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$REMOTE_CMD" 2>&1 | tr '\r' '\n')
-ssh_rc=${PIPESTATUS[0]:-0}
+# The status write is best-effort: a signal tears down WORKDIR from the trap
+# while this subshell is still winding down, and a failed write must not print.
+done < <({ ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$REMOTE_CMD" 2>&1; { echo $? >"$RC_FILE"; } 2>/dev/null; })
+# PIPESTATUS here would describe the while loop, not the ssh inside the process
+# substitution, so every failure used to be reported as a clean "exhausted".
+# Prefer the remote kangaroo's own code; fall back to ssh's for transport errors.
+if [[ -n "$remote_rc" ]]; then
+  ssh_rc="$remote_rc"
+else
+  ssh_rc="$(cat "$RC_FILE" 2>/dev/null || echo 0)"
+  [[ "$ssh_rc" =~ ^[0-9]+$ ]] || ssh_rc=0
+fi
 set -e
 
 now_ms=$(($(date +%s) * 1000))
@@ -133,7 +195,6 @@ elapsed=$((now_ms - t0_ms))
 if [[ -n "$found_priv" ]]; then
   printf '{"event":"found","priv":"%s","ops":%s,"dps":0,"elapsedMs":%s}\n' \
     "$found_priv" "$last_ops" "$elapsed"
-  ssh "${SSH_OPTS[@]}" "$SSH_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null || true
   exit 0
 fi
 
@@ -152,12 +213,9 @@ if scp "${SSH_OPTS[@]}" -q "$SSH_HOST:$REMOTE_OUT" "$OUT_LOCAL" 2>/dev/null; the
     priv="$(pad_priv "$priv")"
     printf '{"event":"found","priv":"%s","ops":%s,"dps":0,"elapsedMs":%s}\n' \
       "$priv" "$last_ops" "$elapsed"
-    ssh "${SSH_OPTS[@]}" "$SSH_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null || true
     exit 0
   fi
 fi
-
-ssh "${SSH_OPTS[@]}" "$SSH_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null || true
 
 if [[ "$ssh_rc" -eq 130 || "$ssh_rc" -eq 143 ]]; then
   printf '{"event":"cancelled","ops":%s,"elapsedMs":%s}\n' "$last_ops" "$elapsed"
