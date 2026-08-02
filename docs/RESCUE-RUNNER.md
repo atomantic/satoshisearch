@@ -29,6 +29,19 @@ The runner **owns the grind loop** in its process. The UI can still view hits/au
 against the same database. Do not start the same source in UI *and* runner (two
 processes = two cursors fighting).
 
+**UI Idle ≠ runner stopped.** The Grinder page only reflects the web server’s
+in-process engine. `pm2`-managed `rescue-runner` is independent:
+
+```sh
+pm2 status rescue-runner
+pm2 stop rescue-runner    # halt the race worker
+pm2 logs rescue-runner
+```
+
+When a finite source is fully ground (`--resume` cursor ≥ space size), the runner
+exits **75** and PM2 will not restart it (`stop_exit_codes: [75]`). Crashes still
+autorestart.
+
 ## Grinder pace (overnight / light)
 
 In **Settings → Grinder pace** (or env `GRIND_PACE` / `GRIND_MAX_WORKERS` / `GRIND_THROTTLE_MS`):
@@ -88,8 +101,13 @@ npm run rescue:run -- --source coldcard --require-live --resume
 
 ```sh
 pm2 start ecosystem.config.cjs --only rescue-runner
-# Edit ecosystem env: RESCUE_SOURCE, RESCUE_REFRESH_HOURS, etc.
+# Edit ecosystem env / args: --source, --resume, --refresh-hours, etc.
+pm2 stop rescue-runner   # UI Stop does not affect this process
 ```
+
+Clean completion (space exhausted, SIGINT/SIGTERM handled) uses exit code **75**
+and does not restart. Readiness failures / crashes use other codes and still
+autorestart up to `max_restarts`.
 
 ## What “realtime” means here
 

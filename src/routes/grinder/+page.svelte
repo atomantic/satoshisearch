@@ -114,6 +114,12 @@
         · {data.grind.throttleMs}ms throttle
         · <a href="/settings">change</a>
       </p>
+      <p class="faint small rng-note">
+        This status is the <em>UI process</em> only. A separate
+        <span class="mono">pm2</span> <span class="mono">rescue-runner</span> can grind
+        against the same DB — stop it with
+        <span class="mono">pm2 stop rescue-runner</span> if logs keep scrolling while this is Idle.
+      </p>
       <form method="POST" action="?/start" use:enhance>
         <label class="sel">
           <span class="faint">Source</span>

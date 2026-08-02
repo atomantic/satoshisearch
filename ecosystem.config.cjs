@@ -45,11 +45,16 @@ module.exports = {
       max_memory_restart: '2G'
     },
     /**
-     * Long-lived weak-key race worker. Does not start by default with
-     * `pm2 start ecosystem.config.cjs` unless you pass --only rescue-runner
-     * or start it explicitly. Shares DATA_DIR with the UI.
+     * Long-lived weak-key race worker. Separate from the UI grinder process
+     * (satoshisearch) — Stop in the UI does not stop this. Shares DATA_DIR.
      *
-     * Override RESCUE_SOURCE / flags via env before start.
+     * Does not start with a bare `pm2 start ecosystem.config.cjs` unless you
+     * pass --only rescue-runner or start it explicitly.
+     *
+     * Exit 75 = intentional completion (space exhausted / handled SIGINT|SIGTERM).
+     * PM2 must not restart those or a finished demo slice thrash-loops forever.
+     * Use 75 (not 0): some PM2 builds coerce stop_exit_codes:[0] to number 0,
+     * which is falsy and never disables autorestart. Crashes still autorestart.
      */
     {
       name: 'rescue-runner',
@@ -66,6 +71,8 @@ module.exports = {
       },
       watch: false,
       autorestart: true,
+      // Must match EXIT_DONE in scripts/rescue-runner.ts (do not use 0 — see comment above).
+      stop_exit_codes: [75],
       max_restarts: 20,
       min_uptime: '30s',
       restart_delay: 10_000,

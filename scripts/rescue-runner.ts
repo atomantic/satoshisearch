@@ -30,6 +30,14 @@ function hasFlag(name: string): boolean {
   return process.argv.includes(name);
 }
 
+/**
+ * Exit code for intentional completion (space exhausted, clean stop).
+ * Must be non-zero: some PM2 versions coerce `stop_exit_codes: [0]` to the
+ * number `0`, which is falsy and never disables autorestart. 75 = EX_TEMPFAIL
+ * is unused here as a crash code; ecosystem maps it in stop_exit_codes.
+ */
+const EXIT_DONE = 75;
+
 function usage(): never {
   console.log(`Usage:
   rescue-runner check [--bucket coldcard]
@@ -128,8 +136,22 @@ async function cmdRun(): Promise<void> {
   }
 
   const cursor = resume ? lastCursor(source.name) : 0n;
+  const spaceSize = source.size;
+
+  // Finite sources (e.g. coldcard demo slice): resume past the end means the
+  // space is already fully ground. Exit EXIT_DONE so PM2 stop_exit_codes does not thrash.
+  if (spaceSize != null && cursor >= spaceSize) {
+    console.log(
+      `[runner] space exhausted — source=${source.name} cursor=${cursor} size=${spaceSize} (nothing left to grind)`
+    );
+    console.log(
+      '[runner] re-run without --resume to restart from 0, or pick a larger source / device model'
+    );
+    process.exit(EXIT_DONE);
+  }
+
   console.log(
-    `[runner] starting source=${source.name} bucket=${source.bucket} spaceBits=${source.spaceBits.toFixed(1)} cursor=${cursor} resume=${resume}`
+    `[runner] starting source=${source.name} bucket=${source.bucket} spaceBits=${source.spaceBits.toFixed(1)} cursor=${cursor}${spaceSize != null ? `/${spaceSize}` : ''} resume=${resume}`
   );
 
   await notifyRescue({
@@ -152,27 +174,49 @@ async function cmdRun(): Promise<void> {
       source: source.name,
       bucket: source.bucket
     });
-    process.exit(0);
+    process.exit(EXIT_DONE);
   };
   process.on('SIGINT', () => void stop('SIGINT'));
   process.on('SIGTERM', () => void stop('SIGTERM'));
 
   let lastRefresh = Date.now();
   // Status loop — grind runs in background on the engine; we just report.
+  // Poll at least once per second so a near-instant done (exhausted space) is
+  // noticed without waiting a full --status-sec interval.
+  const pollMs = Math.min(1000, Math.max(200, statusSec * 1000));
+  let lastStatusPrint = 0;
   for (;;) {
-    await new Promise((r) => setTimeout(r, statusSec * 1000));
+    await new Promise((r) => setTimeout(r, pollMs));
     const st = grinder.status;
-    const rate =
-      st.spaceKind === 'rng-states'
-        ? `${st.seedsPerSec ?? 0} states/s · ${st.seedsTried ?? 0} states · ${st.keysTried} keys`
-        : `${st.keysPerSec} keys/s · ${st.keysTried} keys`;
-    console.log(
-      `[runner] ${st.running ? 'RUN' : 'IDLE'} ${st.sourceName ?? '—'} · ${rate} · hits=${st.hits} · backend=${st.backend} · workers=${st.workers}`
-    );
+    const now = Date.now();
+    if (now - lastStatusPrint >= statusSec * 1000 || !st.running) {
+      lastStatusPrint = now;
+      const rate =
+        st.spaceKind === 'rng-states'
+          ? `${st.seedsPerSec ?? 0} states/s · ${st.seedsTried ?? 0} states · ${st.keysTried} keys`
+          : `${st.keysPerSec} keys/s · ${st.keysTried} keys`;
+      console.log(
+        `[runner] ${st.running ? 'RUN' : 'IDLE'} ${st.sourceName ?? '—'} · ${rate} · hits=${st.hits} · backend=${st.backend} · workers=${st.workers}`
+      );
+    }
 
     if (!st.running) {
-      console.log('[runner] grind finished or stopped');
-      break;
+      const doneCursor = lastCursor(source.name);
+      const exhausted = spaceSize != null && doneCursor >= spaceSize;
+      console.log(
+        exhausted
+          ? `[runner] grind complete — space exhausted (cursor=${doneCursor}/${spaceSize})`
+          : '[runner] grind finished or stopped'
+      );
+      await notifyRescue({
+        event: 'rescue-runner',
+        ts: Math.floor(Date.now() / 1000),
+        message: exhausted ? `complete ${source.name}` : `idle ${source.name}`,
+        source: source.name,
+        bucket: source.bucket
+      });
+      // Intentional completion — PM2 stop_exit_codes includes EXIT_DONE.
+      process.exit(EXIT_DONE);
     }
 
     // Optional periodic richlist refresh (restarts grind so match-set reloads).
@@ -186,6 +230,10 @@ async function cmdRun(): Promise<void> {
       }
       lastRefresh = Date.now();
       const cur = lastCursor(source.name);
+      if (spaceSize != null && cur >= spaceSize) {
+        console.log(`[runner] after refresh: space still exhausted (cursor=${cur}/${spaceSize}) — exiting`);
+        process.exit(EXIT_DONE);
+      }
       await grinder.start(source, cur);
     }
   }
