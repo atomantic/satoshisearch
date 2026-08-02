@@ -1,0 +1,39 @@
+{
+  "name": "satoshisearch",
+  "version": "0.1.0",
+  "description": "Self-hosted Bitcoin keyspace observatory & weak-key rescue tool. Watches Satoshi-era coins, tracks the known-keyspace frontier via the puzzle series, and races attackers to rescue provably-weak keys.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node build/index.js",
+    "index:puzzles": "tsx scripts/index-puzzles.ts",
+    "index:coinbase": "tsx scripts/index-coinbase.ts",
+    "index:richlist": "tsx scripts/index-richlist.ts",
+    "sweep": "tsx scripts/sweep.ts",
+    "test": "tsx --test test/*.test.ts",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-node": "^5.2.0",
+    "@sveltejs/kit": "^2.5.0",
+    "@sveltejs/vite-plugin-svelte": "^3.1.0",
+    "svelte": "^4.2.0",
+    "svelte-check": "^3.8.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.3.0"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.5.0",
+    "@scure/base": "^1.1.9",
+    "@scure/bip32": "^1.5.0",
+    "@scure/bip39": "^1.4.0",
+    "@scure/btc-signer": "^1.4.0"
+  }
+}

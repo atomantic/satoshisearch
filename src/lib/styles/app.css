@@ -1,0 +1,209 @@
+/*
+ * satoshisearch theme — a Cyberpunk Crystal variant, kept consistent with the
+ * zapomatic bitwatch app (neon pink / cyan / deep purple, Roboto Mono), with a
+ * bitcoin-orange accent reserved for balances and value.
+ */
+:root {
+  --primary: #ff61d8;        /* neon pink — primary actions/highlights */
+  --secondary: #4df4ff;      /* cyan — secondary accents, links */
+  --accent-soft: #b6f7ff;    /* light cyan — subtle text accents */
+  --warning: #ff9b3d;
+  --danger: #ff5757;
+  --success: #7bffa0;
+  --btc: #f7931a;            /* bitcoin orange — value/balances only */
+
+  --bg: #1a1040;             /* deep purple background */
+  --surface: #2a1b50;        /* card/surface */
+  --surface-2: #34215f;
+  --border: rgba(77, 244, 255, 0.22);
+  --border-strong: rgba(77, 244, 255, 0.4);
+
+  --text: #ffffff;
+  --text-dim: #b9a9e8;
+  --text-faint: #7d6db0;
+
+  --glow-primary: rgba(255, 97, 216, 0.5);
+  --glow-secondary: rgba(77, 244, 255, 0.5);
+  --glow-success: rgba(123, 255, 160, 0.45);
+  --crystal-gradient: linear-gradient(45deg, rgba(255, 97, 216, 0.2), rgba(77, 244, 255, 0.2));
+
+  --mono: 'Roboto Mono', ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  --sans: 'Roboto Mono', ui-monospace, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle crystalline backdrop */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(255, 97, 216, 0.08), transparent 60%),
+    radial-gradient(1000px 500px at 90% 0%, rgba(77, 244, 255, 0.07), transparent 55%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+a {
+  color: var(--secondary);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+  text-shadow: 0 0 8px var(--glow-secondary);
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+h1 {
+  font-size: 26px;
+}
+
+.container {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 24px;
+  position: relative;
+  z-index: 1;
+}
+
+/* Crystal panel — bordered, faint gradient sheen */
+.card {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  overflow: hidden;
+}
+.card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--crystal-gradient);
+  opacity: 0.08;
+  pointer-events: none;
+}
+.card > * {
+  position: relative;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.badge.sealed {
+  color: var(--warning);
+  background: rgba(255, 155, 61, 0.12);
+  border-color: rgba(255, 155, 61, 0.3);
+}
+.badge.exposed {
+  color: var(--danger);
+  background: rgba(255, 87, 87, 0.12);
+  border-color: rgba(255, 87, 87, 0.32);
+  box-shadow: 0 0 12px rgba(255, 87, 87, 0.15);
+}
+.badge.solved {
+  color: var(--text-faint);
+  background: rgba(125, 109, 176, 0.12);
+  border-color: var(--border);
+}
+
+.muted {
+  color: var(--text-dim);
+}
+.faint {
+  color: var(--text-faint);
+}
+.btc {
+  color: var(--btc);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(77, 244, 255, 0.1);
+}
+th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent-soft);
+  font-weight: 600;
+}
+tbody tr:hover {
+  background: rgba(77, 244, 255, 0.04);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+button,
+.btn {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+button:hover,
+.btn:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 12px var(--glow-secondary);
+}
+.btn-accent {
+  background: linear-gradient(135deg, var(--primary), #d94fb8);
+  color: #1a1206;
+  border-color: transparent;
+}
+.btn-accent:hover {
+  box-shadow: 0 0 16px var(--glow-primary);
+}
