@@ -51,6 +51,8 @@ export type KangarooStatus = {
   running: boolean;
   puzzleN: number | null;
   address: string | null;
+  /** Target balance in sats, so the card can show what is at stake. */
+  balance: number | null;
   halfBits: number | null;
   ops: number;
   opsPerSec: number;
@@ -142,6 +144,7 @@ class KangarooEngine {
       running: this.running,
       puzzleN: this.target?.n ?? null,
       address: this.target?.address ?? null,
+      balance: this.target?.balance ?? null,
       halfBits: this.target?.halfBits ?? null,
       ops: this.ops,
       opsPerSec: Math.round(this.opsPerSec),

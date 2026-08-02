@@ -3,7 +3,7 @@
   import { enhance } from '$app/forms';
   import { invalidateAll } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
-  import { bigCount, btcShort, shortAddr } from '$lib/format';
+  import { bigCount, btcShort, shortAddr, duration } from '$lib/format';
 
   export let data: PageData;
   export let form: ActionData;
@@ -24,6 +24,15 @@
   $: matchN = data.matchSet.size;
   $: snap = data.richlistSnapshot;
   $: snapAgeH = snap ? Math.round((Date.now() / 1000 - snap.createdAt) / 3600) : null;
+
+  // Pollard's kangaroo is expected to land the key after ~2^halfBits group
+  // operations. That is a median, not a deadline — the search is probabilistic,
+  // so this reads as "time to reach the expected work at the current rate".
+  $: expectedOps = kg.halfBits === null ? null : Math.pow(2, kg.halfBits);
+  $: etaSeconds =
+    expectedOps !== null && kg.opsPerSec > 0
+      ? Math.max(0, expectedOps - kg.ops) / kg.opsPerSec
+      : null;
 </script>
 
 <svelte:head><title>Grinder · satoshisearch</title></svelte:head>
@@ -207,9 +216,22 @@
       <div><span class="faint">ops (Σ)</span><b class="num">{bigCount(kg.ops)}</b></div>
       <div><span class="faint">DPs</span><b class="num">{bigCount(kg.dps)}</b></div>
       <div><span class="faint">~work</span><b class="num">2<sup>{kg.halfBits}</sup></b></div>
+      <div title="Time to reach the expected work at the current rate. The search is probabilistic — it can land far sooner or later.">
+        <span class="faint">eta @ rate</span><b class="num">{duration(etaSeconds)}</b>
+      </div>
       <div><span class="faint">hits</span><b class="num" class:btc={kg.hits > 0}>{kg.hits}</b></div>
     </div>
-    <p class="faint small mono">{shortAddr(kg.address ?? '')}</p>
+    <p class="target">
+      <span class="faint small">target</span>
+      {#if kg.addressLink}
+        <a class="mono addr" href={kg.addressLink} target="_blank" rel="noreferrer">{kg.address}</a>
+      {:else}
+        <span class="mono addr">{kg.address}</span>
+      {/if}
+      {#if kg.balance !== null}
+        <span class="bal btc">{btcShort(kg.balance)} BTC</span>
+      {/if}
+    </p>
     <form method="POST" action="?/kangarooStop" use:enhance>
       <button class="stop">Stop kangaroo</button>
     </form>
@@ -441,6 +463,23 @@
   }
   .metrics b {
     font-size: 20px;
+  }
+  .target {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    margin: 0 0 12px;
+  }
+  /* Addresses are shown in full, so they have to be able to wrap rather than
+     push the card wider than the grid column. */
+  .addr {
+    font-size: 12px;
+    word-break: break-all;
+  }
+  .bal {
+    font-size: 12px;
+    white-space: nowrap;
   }
   .sel {
     display: flex;

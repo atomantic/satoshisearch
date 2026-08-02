@@ -34,6 +34,24 @@ export function bigCount(n: number): string {
   return `${v.toFixed(v < 10 ? 1 : 0)}${units[u]}`;
 }
 
+/**
+ * Coarse human duration. Kangaroo ETAs range from seconds to far past the age
+ * of the universe, so anything beyond a year falls back to a magnitude-suffixed
+ * year count rather than an unreadable pile of digits.
+ */
+export function duration(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 1) return '<1s';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
+  const days = seconds / 86_400;
+  if (days < 365) return `${Math.floor(days)}d ${Math.round((days % 1) * 24)}h`;
+  const years = days / 365.25;
+  if (years < 1000) return `${years < 10 ? years.toFixed(1) : Math.round(years)}y`;
+  return `${bigCount(Math.round(years))}y`;
+}
+
 export function timeAgo(unixSec: number | null): string {
   if (!unixSec) return 'never';
   const s = Math.floor(Date.now() / 1000) - unixSec;

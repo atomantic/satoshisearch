@@ -5,17 +5,21 @@ import { kangaroo } from '$server/grinder/kangaroo-engine';
 import { makeSource, listSources } from '$server/grinder/registry';
 import { matchSetCounts, latestRichlistSnapshot } from '$server/grinder/loadset';
 import { effectiveRescue, effectiveGrind } from '$server/settings';
+import { addressLink } from '$server/links';
 
 export const load: PageServerLoad = async () => {
   const snap = latestRichlistSnapshot();
   const rescue = effectiveRescue();
   const grind = effectiveGrind();
+  const kg = kangaroo.status;
   return {
     status: grinder.status,
     vaultReady: grinder.vaultReady,
     sources: listSources(),
     matchSet: matchSetCounts(),
-    kangaroo: kangaroo.status,
+    // The explorer host is a server-side setting, so the link is resolved here
+    // rather than reassembled in the card.
+    kangaroo: { ...kg, addressLink: kg.address ? addressLink(kg.address) : null },
     kangarooTargets: kangaroo.listTargets().map((t) => ({
       n: t.n,
       address: t.address,
