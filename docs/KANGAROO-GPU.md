@@ -143,6 +143,36 @@ in the SSH wrapper) at whatever binary you trust and have reviewed.
 
 ---
 
+## Windows + WSL2 GPU runner (mirrored networking)
+
+A Windows box with an NVIDIA GPU makes a fine topology-B runner via **WSL2** — the JLP
+binary and sshd live in WSL, using the Windows driver (no Linux driver install). Reference
+setup for an RTX 3090:
+
+1. **CUDA toolkit in WSL** (no driver): add NVIDIA's `wsl-ubuntu` apt repo, install
+   `cuda-nvcc-12-6` + `cuda-cudart-dev-12-6`, then register the runtime so *non-login SSH
+   shells* can find it: `echo /usr/local/cuda/lib64 > /etc/ld.so.conf.d/cuda.conf && ldconfig`.
+2. **Build kangaroo**: `make gpu=1 ccap=86 CUDA=/usr/local/cuda CXXCUDA=/usr/bin/g++ all`,
+   install to `/opt/Kangaroo/kangaroo`, confirm `kangaroo -l` lists the GPU.
+3. **sshd in WSL**: `openssh-server`, key-only (`PasswordAuthentication no`, `AllowUsers <you>`),
+   auto-start on WSL boot via `/etc/wsl.conf`:
+   ```ini
+   [boot]
+   command = service ssh start
+   ```
+4. **Keep WSL alive** (it only runs on demand): register
+   [`scripts/gpu-runner-keepalive.ps1`](../scripts/gpu-runner-keepalive.ps1) as a per-user
+   logon Scheduled Task so sshd is always reachable.
+5. **Open the firewall**: with `networkingMode=mirrored` in `.wslconfig`, WSL shares the host
+   IPs (no `netsh portproxy` needed) — but inbound is gated by the **WSL Hyper-V firewall**
+   (`DefaultInboundAction=Block`). Run
+   [`scripts/gpu-runner-firewall.ps1`](../scripts/gpu-runner-firewall.ps1) **elevated** to allow
+   TCP 22 through both the Hyper-V and standard firewalls, scoped to Tailscale + LAN.
+
+The observatory then connects to the host's Tailscale/LAN address as `<you>@host` on port 22
+(a `~/.ssh/config` alias keeps `ssh` and `scp` consistent — avoid `-p` in `KANGAROO_SSH_OPTS`,
+which `scp` reads as "preserve times", not port).
+
 ## Wire-up checklist
 
 ### GPU host
@@ -268,6 +298,8 @@ upgrade over a laptop; it is **not** “solve #140 overnight.” See frontier no
 | `src/lib/server/grinder/kangaroo-engine.ts` | UI engine + hit pipeline |
 | `scripts/kangaroo.ts` | CLI |
 | `scripts/kangaroo-ssh-wrapper.sh` | Remote GPU JSONL adapter |
+| `scripts/gpu-runner-keepalive.ps1` | Keep WSL2 runner + sshd alive (logon task) |
+| `scripts/gpu-runner-firewall.ps1` | Open TCP 22 to WSL (Hyper-V + standard firewall) |
 | `scripts/kangaroo-jlp-example.env` | Env template for topology A |
 | `scripts/kangaroo-external-echo.sh` | JSONL plumbing smoke test |
 | Settings UI | **Kangaroo backend** card |

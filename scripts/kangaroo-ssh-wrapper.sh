@@ -138,7 +138,9 @@ OUT_LOCAL="$WORKDIR/result.txt"
 if scp "${SSH_OPTS[@]}" -q "$SSH_HOST:$REMOTE_OUT" "$OUT_LOCAL" 2>/dev/null; then
   priv=""
   if grep -qoE 'Priv:[[:space:]]*0x[0-9a-fA-F]+' "$OUT_LOCAL" 2>/dev/null; then
-    priv="$(grep -oE '0x[0-9a-fA-F]+' "$OUT_LOCAL" | head -1 | sed 's/^0x//')"
+    # Take the hex AFTER "Priv:", not the first 0x token — the "Pub:" value
+    # precedes it in JLP's -o file and would otherwise be returned as the key.
+    priv="$(grep -oiE 'Priv:[[:space:]]*0x[0-9a-fA-F]+' "$OUT_LOCAL" | head -1 | sed -E 's/.*0[xX]//')"
   elif grep -qoE '^[0-9a-fA-F]{16,64}$' "$OUT_LOCAL" 2>/dev/null; then
     priv="$(grep -oE '^[0-9a-fA-F]{16,64}$' "$OUT_LOCAL" | head -1)"
   fi
