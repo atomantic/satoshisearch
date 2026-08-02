@@ -12,20 +12,12 @@ import {
   lowEntropySource,
   type GrindSource
 } from './sources';
-import { coldcardSource, DEFAULT_COLDCARD_CONFIG, type ColdcardConfig } from './coldcard';
-import { bcdTime } from './yasmarang';
-
-/**
- * Demo ColdCard config: one candidate uid, a small SysTick window, a one-hour
- * creation window at minute resolution, and a small SSR range. Runnable out of
- * the box; a real rescue narrows uid + time to the target device. The seed-state
- * enumeration is exact — only the rng_get() consumption pattern is still assumed.
- */
-function demoColdcardConfig(): ColdcardConfig {
-  const trValues: number[] = [];
-  for (let m = 0; m < 60; m++) trValues.push(bcdTime(14, m, 0));
-  return { ...DEFAULT_COLDCARD_CONFIG, uids: [0xdeadbeef], systick: [0, 1023], trValues, ssr: [0, 15] };
-}
+import {
+  coldcardSource,
+  demoColdcardConfig,
+  mk3ColdBootConfig,
+  mk4ReseedConfig
+} from './coldcard';
 
 const datasetsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'datasets');
 
@@ -56,6 +48,10 @@ export interface SourceInfo {
   label: string;
   bucket: string;
   spaceBits: number;
+  /** sequential-keys | rng-states | phrase-list | digit-windows */
+  spaceKind: string;
+  /** Human label for what spaceBits measures. */
+  spaceUnit: string;
   description: string;
   available: boolean;
   note?: string;
@@ -81,71 +77,117 @@ export function makeSource(id: string): GrindSource | null {
       return lowEntropySource(2_000_000);
     case 'coldcard':
       return coldcardSource(demoColdcardConfig());
+    case 'coldcard-mk3-demo':
+      // Known fake UID, full Mk3 SysTick, cold-boot static RTC (~80k states).
+      return coldcardSource(mk3ColdBootConfig(0xdeadbeef, [0, 2047]));
+    case 'coldcard-mk4-reseed-demo':
+      // Tiny reseed slice for UI; real rescue widens reseedRange.
+      return coldcardSource(mk4ReseedConfig([0, 4095], { n: 0, d: 0 }));
     default:
       return null;
   }
 }
 
+/**
+ * Presentation-only fields. Everything about the *space* (bits, kind, unit) is
+ * read off the real source via makeSource() — restating it here is how the
+ * picker drifted from what the grinder actually searches.
+ */
+const SOURCE_PRESENTATION: Array<{
+  id: string;
+  label: string;
+  description: string | ((src: GrindSource) => string);
+  note?: string;
+}> = [
+  {
+    id: 'puzzle-71',
+    label: 'Puzzle 71 range',
+    description:
+      'Sequential private keys in [2^70, 2^71) — the live sealed puzzle frontier. Different from ColdCard: those keys are not low integers; they come from a weak RNG seed state.'
+  },
+  {
+    id: 'puzzle-72',
+    label: 'Puzzle 72 range',
+    description:
+      'Sequential private keys in [2^71, 2^72). Depth is comparable to ColdCard *effective entropy* only as a yardstick — the search structures are different (range vs RNG-state expand).'
+  },
+  {
+    id: 'brainwallet',
+    label: 'Brainwallets',
+    description: (src) =>
+      `SHA256 of ${src.size} known passphrases. The genuinely realistic rescue class — real people lost coins this way.`
+  },
+  {
+    id: 'constants-pi',
+    label: 'Digits of π',
+    description: 'Sliding windows over the digits of π, hashed to keys.'
+  },
+  {
+    id: 'constants-e',
+    label: 'Digits of e',
+    description: 'Sliding windows over the digits of e, hashed to keys.'
+  },
+  {
+    id: 'lowentropy',
+    label: 'Low-entropy keys',
+    description: 'Small integers and simple patterns (key = 1, 2, 3, …). Catches trivially weak keys.'
+  },
+  {
+    id: 'coldcard',
+    label: 'ColdCard demo (tiny)',
+    description: (src) => {
+      const m = src.rngSpace!;
+      return `UI demo slice only (~2^${m.workBits.toFixed(1)} states). Use mk3/mk4 profiles for real geometry. Expand: state→entropy→BIP39→BIP32 paths.`;
+    },
+    note: 'not an attack profile'
+  },
+  {
+    id: 'coldcard-mk3-demo',
+    label: 'ColdCard Mk3 cold-boot (demo SysTick)',
+    description: (src) => {
+      const m = src.rngSpace!;
+      return `Mk3 model: known UID, pad=uid⊕SysTick, cold-boot RTC static (TR=SSR=0). Demo uses 2048 SysTick of 80k. Full known-UID cold-boot ≈2^16.3. libngu-xor + sha256d. States=${m.seedStates}.`;
+    },
+    note: 'set real UID + full SysTick for rescue'
+  },
+  {
+    id: 'coldcard-mk4-reseed-demo',
+    label: 'ColdCard Mk4 reseed slice (demo)',
+    description: (src) => {
+      const m = src.rngSpace!;
+      return `Mk4 model when fallback timers fixed: enumerate SE reseed word only (≤2^32). Demo 4096 of 2^32. States=${m.seedStates}.`;
+    },
+    note: 'slice reseedRange; full 2^32 needs serious compute'
+  }
+];
+
 export function listSources(): SourceInfo[] {
-  const phrases = loadPhrases();
-  return [
-    {
-      id: 'puzzle-71',
-      label: 'Puzzle 71 range',
-      bucket: 'puzzle',
-      spaceBits: 70,
-      description: 'Enumerate [2^70, 2^71) — the live sealed frontier. Infeasible to exhaust; runs as a demonstration and to target the ColdCard-adjacent depth.',
-      available: true
-    },
-    {
-      id: 'puzzle-72',
-      label: 'Puzzle 72 range',
-      bucket: 'puzzle',
-      spaceBits: 71,
-      description: 'Enumerate [2^71, 2^72) — exactly the ColdCard entropy depth.',
-      available: true
-    },
-    {
-      id: 'brainwallet',
-      label: 'Brainwallets',
-      bucket: 'brainwallet',
-      spaceBits: Math.log2(Math.max(phrases.length, 1)),
-      description: `SHA256 of ${phrases.length} known passphrases. The genuinely realistic rescue class — real people lost coins this way.`,
-      available: phrases.length > 0
-    },
-    {
-      id: 'constants-pi',
-      label: 'Digits of π',
-      bucket: 'constants',
-      spaceBits: 8,
-      description: 'Sliding windows over the digits of π, hashed to keys.',
-      available: true
-    },
-    {
-      id: 'constants-e',
-      label: 'Digits of e',
-      bucket: 'constants',
-      spaceBits: 8,
-      description: 'Sliding windows over the digits of e, hashed to keys.',
-      available: true
-    },
-    {
-      id: 'lowentropy',
-      label: 'Low-entropy keys',
-      bucket: 'lowentropy',
-      spaceBits: 21,
-      description: 'Small integers and simple patterns (key = 1, 2, 3, …). Catches trivially weak keys.',
-      available: true
-    },
-    {
-      id: 'coldcard',
-      label: 'ColdCard 2026 (Yasmarang)',
-      bucket: 'coldcard',
-      spaceBits: Math.log2(1 * 1024 * 60 * 16), // demo slice: uid × SysTick × TR × SSR
-      description:
-        'Enumerate the MicroPython Yasmarang fallback-RNG seed-state space (uid × SysTick × RTC->TR × RTC->SSR), reproduce the BIP39 entropy stream, and derive standard paths. Demo config runs out of the box; a real rescue pins the target uid + creation-time window. Entropy stream assumes 4-byte-per-call consumption (pending device confirmation).',
-      available: true,
-      note: 'demo config — set target uid/time for a real device'
+  return SOURCE_PRESENTATION.map((p) => {
+    const src = makeSource(p.id);
+    if (!src) {
+      return {
+        id: p.id,
+        label: p.label,
+        bucket: 'unknown',
+        spaceBits: 0,
+        spaceKind: 'sequential-keys',
+        spaceUnit: '',
+        description: typeof p.description === 'string' ? p.description : '',
+        available: false,
+        note: p.note
+      };
     }
-  ];
+    return {
+      id: p.id,
+      label: p.label,
+      bucket: src.bucket,
+      spaceBits: src.spaceBits,
+      spaceKind: src.spaceKind ?? 'sequential-keys',
+      spaceUnit: src.spaceUnit ?? '',
+      description: typeof p.description === 'string' ? p.description : p.description(src),
+      // A source with an empty space (e.g. no phrase list loaded) can't be run.
+      available: src.size == null || src.size > 0n,
+      note: p.note
+    };
+  });
 }

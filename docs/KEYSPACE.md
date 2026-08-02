@@ -31,18 +31,36 @@ The frontier is a yardstick for weak-key classes:
 | Depth | What lives there |
 |---|---|
 | ~40 bits | Brainwallets (human-chosen phrases). Trivially searchable. |
-| **72 bits** | **The 2026 ColdCard entropy flaw** — a firmware bug dropped seed entropy from 128 to 72 bits. ~1,082 BTC swept from 1,196 wallets in 41 minutes. |
+| **~72 bits work** | **The 2026 ColdCard entropy flaw** — weak Yasmarang RNG *seed state*, not keys in `[1, 2^72)`. Each state expands BIP39→BIP32 into ordinary 256-bit keys scattered across the full space. ~1,082 BTC swept from 1,196 wallets in 41 minutes. |
 | 128 bits | BIP39 12-word floor; the ECDLP security of Satoshi's exposed P2PK keys. |
 | 256 bits | BIP39 24-word. |
 
-The ColdCard depth (72) sits just **2 bits** above the demonstrated public brute-force frontier (70).
-That proximity is the whole story: the flaw put real coins within a hair of reachable space. The
-`/keyspace` page renders this directly — the searched region, the exposed-and-funded set still at
-risk, and the reference bands on a single 0→256-bit axis.
+### ColdCard ≠ puzzle-72
+
+Puzzle N means: private keys are sequential integers in `[2^(N-1), 2^N)`. ColdCard means:
+
+```
+for each RNG state S:          # uid × SysTick × RTC→TR × RTC→SSR
+  entropy = Yasmarang(S)
+  seed    = BIP39(entropy)
+  master  = BIP32(seed)
+  derive common paths → match funded scripts
+```
+
+The ~72-bit figure is **effective entropy of the RNG seed** (and collapses further when
+device uid / creation time are known). It is *not* a claim that the resulting private keys are
+small integers. Plotting it next to puzzle-70 is a **work-budget yardstick**, not the same search
+geometry. See `docs/RNG-SPACE.md`.
+
+The ColdCard work depth (~72) sits just **2 bits** above the demonstrated public brute-force
+frontier (70). That proximity is the whole story: the flaw put real coins within a hair of
+reachable *compute*, even though the keys themselves are full-size. The `/keyspace` page renders
+this as a reference band on the 0→256 axis.
 
 ## Honest math
 
 A linear bit axis is the correct scale because bits are already `log2(keyspace)` — each +1 bit
-doubles the work. Doubling your hardware buys exactly one more bit. At ~10^5 keys/s across a typical
-machine, 2^72 alone is ~10^8 years. Unbounded grinding never succeeds; the value is entirely in
-*bounded* weak-key classes and in watching the frontier move.
+doubles the work. Doubling your hardware buys exactly one more bit. At ~10^5 keys/s (JS) or
+~10^6 keys/s (native libsecp256k1) on a typical machine, 2^72 alone is still ~10^7–10^8 years.
+Unbounded grinding never succeeds; the value is entirely in *bounded* weak-key classes and in
+watching the frontier move.

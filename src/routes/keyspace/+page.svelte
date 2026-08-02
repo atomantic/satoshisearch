@@ -126,10 +126,11 @@
 
     <div class="insight">
       <span class="dot danger"></span>
-      The <b>ColdCard 2026</b> flaw collapsed seed entropy to <b>72 bits</b> — only
-      <b>{72 - a.bruteForceFrontier}</b> bits beyond the demonstrated public brute-force frontier of
-      <b>{a.bruteForceFrontier} bits</b>. That is why ~1,082 BTC was swept in 41 minutes: the weak
-      keys sat right at the edge of reachable space.
+      The <b>ColdCard 2026</b> flaw left the wallet’s <em>RNG seed</em> with ~<b>72 bits</b> of
+      uncertainty (then BIP39→BIP32 into normal 256-bit keys). That work budget is only
+      <b>{72 - a.bruteForceFrontier}</b> bits past the demonstrated public brute-force frontier of
+      <b>{a.bruteForceFrontier} bits</b> — which is why ~1,082 BTC was swept in 41 minutes. This is
+      <em>not</em> the same as puzzle-72’s sequential key range; see docs/RNG-SPACE.md.
     </div>
   </div>
 

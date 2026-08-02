@@ -55,7 +55,8 @@ export const REFERENCE_BANDS: ReferenceBand[] = [
     label: 'ColdCard 2026',
     bits: 72,
     kind: 'threat',
-    note: 'MicroPython Yasmarang fallback RNG: 128→72 effective bits. ~1,082 BTC swept in 41 min.'
+    note:
+      'Weak Yasmarang RNG seed (~72 bits of state), expanded via BIP39/BIP32 into normal 256-bit keys scattered across the full space — not a sequential [1,2^72) range. ~1,082 BTC swept in 41 min.'
   },
   { label: 'BIP39 128-bit', bits: 128, kind: 'safe', note: '12-word mnemonic entropy floor.' },
   {

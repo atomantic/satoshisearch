@@ -7,31 +7,63 @@
  * One source runs at a time; switching sources stops the current run.
  */
 import { openDb, nowSec } from '../db';
-import { config, mayAutoSweep, type Bucket } from '../config';
-import { p2pkhScript } from '../script';
+import type { Bucket } from '../config';
+import { mayAutoSweep, effectiveGrind, type GrindPace } from '../settings';
+import { scriptForTarget } from '../script';
 import { scriptBalance } from '../mempool';
-import { GrinderPool } from './pool';
+import { GrinderPool, coldcardWorkerCfg } from './pool';
 import { loadMatchSet, findTargetByMatch } from './loadset';
 import { encryptKey, isVaultConfigured } from '../rescue/vault';
 import { audit } from '../rescue/audit';
 import { handleHit } from '../rescue/sweeper';
-import type { GrindSource, KeyCandidate } from './sources';
+import { notifyRescue } from '../rescue/notify';
+import type { GrindSource, SpaceKind } from './sources';
 import type { Match } from './matchset';
+import { generateColdcardSeeds, type RngSpaceModel } from './coldcard';
 
 export interface GrinderStatus {
   running: boolean;
   sourceName: string | null;
   bucket: Bucket | null;
   workers: number;
+  /** 'native' = satoshi-grind (libsecp256k1); 'js' = worker_threads + @noble. */
+  backend: 'native' | 'js' | 'none';
+  /**
+   * Derived private keys checked (after BIP32 etc.). For coldcard this is
+   * paths×gap per seed — not the RNG-state progress denominator.
+   */
   keysTried: number;
   keysPerSec: number;
+  /**
+   * RNG seed states expanded (coldcard only). Null for sequential-key sources.
+   * Progress through coldcard space is seedsTried / spaceSize, not keysTried.
+   */
+  seedsTried: number | null;
+  seedsPerSec: number | null;
   spaceBits: number | null;
+  spaceKind: SpaceKind | null;
+  /** Total work units (seed states or keys) as decimal string when known. */
+  spaceSize: string | null;
+  /** Live resume cursor (seed index or key offset). */
   cursor: string | null;
   hits: number;
   startedAt: number | null;
+  /** Coldcard dimension breakdown when running that source. */
+  rngSpace: RngSpaceModel | null;
+  /** Effective CPU pace (light/normal/full). */
+  pace: GrindPace | null;
+  throttleMs: number | null;
 }
 
-const BATCH = 4000;
+/** JS noble path is allocation-heavy; smaller batches keep latency low. */
+export const BATCH_JS = 4000;
+/** Native amortizes better with larger batches (single process + pthreads). */
+export const BATCH_NATIVE = 16384;
+/** Range mode is cheap to dispatch — larger slices fill the native threads. */
+export const BATCH_RANGE = 65536;
+/** Coldcard: seeds per job (each seed expands to many HD keys via PBKDF2). */
+/** Coldcard: seeds per job (native OpenSSL PBKDF2 — larger batches OK). */
+export const BATCH_COLDCARD_SEEDS = 32;
 
 class GrinderEngine {
   private pool: GrinderPool | null = null;
@@ -39,23 +71,39 @@ class GrinderEngine {
   private running = false;
   private stopRequested = false;
   private keysTried = 0;
+  private seedsTried = 0;
+  private cursor: bigint | null = null;
   private startedAt: number | null = null;
-  private lastRateSample = { t: 0, keys: 0 };
+  private lastRateSample = { t: 0, keys: 0, seeds: 0 };
   private keysPerSec = 0;
+  private seedsPerSec = 0;
   private hits = 0;
+  private rngSpace: RngSpaceModel | null = null;
+  private pace: GrindPace | null = null;
+  private throttleMs = 0;
 
   get status(): GrinderStatus {
+    const kind = this.source?.spaceKind ?? null;
     return {
       running: this.running,
       sourceName: this.source?.name ?? null,
       bucket: this.source?.bucket ?? null,
       workers: this.pool?.workerCount ?? 0,
+      backend: this.pool?.backendName ?? 'none',
       keysTried: this.keysTried,
       keysPerSec: Math.round(this.keysPerSec),
+      seedsTried: kind === 'rng-states' ? this.seedsTried : null,
+      seedsPerSec: kind === 'rng-states' ? Math.round(this.seedsPerSec) : null,
       spaceBits: this.source?.spaceBits ?? null,
-      cursor: null,
-      hits: this.hits
-    } as GrinderStatus & { startedAt?: number | null };
+      spaceKind: kind,
+      spaceSize: this.source?.size != null ? this.source.size.toString() : null,
+      cursor: this.cursor != null ? this.cursor.toString() : null,
+      hits: this.hits,
+      startedAt: this.startedAt,
+      rngSpace: this.rngSpace,
+      pace: this.running ? this.pace : null,
+      throttleMs: this.running ? this.throttleMs : null
+    };
   }
 
   async start(source: GrindSource, resumeCursor = 0n): Promise<void> {
@@ -64,15 +112,44 @@ class GrinderEngine {
     this.running = true;
     this.stopRequested = false;
     this.keysTried = 0;
+    this.seedsTried = 0;
+    this.cursor = resumeCursor;
     this.hits = 0;
     this.startedAt = nowSec();
-    this.lastRateSample = { t: Date.now(), keys: 0 };
+    this.lastRateSample = { t: Date.now(), keys: 0, seeds: 0 };
+    this.keysPerSec = 0;
+    this.seedsPerSec = 0;
+
+    this.rngSpace = source.rngSpace ?? null;
+    const grind = effectiveGrind();
+    this.pace = grind.pace;
+    this.throttleMs = grind.throttleMs;
 
     const set = loadMatchSet();
     this.pool = new GrinderPool();
     await this.pool.start(set);
 
-    audit('grind-start', { source: source.name, bucket: source.bucket, matchSetSize: set.size, workers: this.pool.workerCount });
+    audit('grind-start', {
+      source: source.name,
+      bucket: source.bucket,
+      matchSetSize: set.size,
+      workers: this.pool.workerCount,
+      backend: this.pool.backendName,
+      pace: grind.pace,
+      throttleMs: grind.throttleMs,
+      maxWorkers: grind.maxWorkers,
+      spaceKind: source.spaceKind ?? 'sequential-keys',
+      spaceSize: source.size?.toString() ?? null,
+      spaceBits: source.spaceBits,
+      rngSpace: this.rngSpace
+        ? {
+            seedStates: this.rngSpace.seedStates.toString(),
+            keysPerSeed: this.rngSpace.keysPerSeed,
+            workBits: this.rngSpace.workBits,
+            isDemoSlice: this.rngSpace.isDemoSlice
+          }
+        : null
+    });
 
     // Persist source registration/progress.
     const db = openDb();
@@ -91,45 +168,131 @@ class GrinderEngine {
   private async loop(source: GrindSource, startCursor: bigint): Promise<void> {
     const pool = this.pool!;
     let cursor = startCursor;
+    this.cursor = cursor;
     const inflight: Promise<void>[] = [];
     const maxInflight = pool.workerCount * 2;
 
-    // Some sources (coldcard) do heavy per-candidate work (BIP39 PBKDF2) inside
-    // generate() on this thread. Use a smaller batch for those and always yield
-    // to the event loop between batches so stop requests and web traffic are
-    // served even mid-grind.
-    const batch = source.bucket === 'coldcard' ? 250 : BATCH;
+    const coldcardCfg = source.coldcardConfig;
+    const useColdcardWorkers = source.bucket === 'coldcard' && !!coldcardCfg;
+    const useRange = !useColdcardWorkers && !!source.rangeBatch;
+    // Loop-invariant: serialized once, not rebuilt per job.
+    const workerCfg = coldcardCfg ? coldcardWorkerCfg(coldcardCfg) : null;
+    const grind = effectiveGrind();
+    const scale = grind.batchScale;
+    const throttle = grind.throttleMs;
+
+    const batch = Math.max(
+      1,
+      Math.floor(
+        (useColdcardWorkers
+          ? BATCH_COLDCARD_SEEDS
+          : useRange
+            ? BATCH_RANGE
+            : pool.backendName === 'native'
+              ? BATCH_NATIVE
+              : BATCH_JS) * scale
+      )
+    );
+
+    // Light pace: keep pipeline shallow so we don't queue work faster than throttle.
+    // Native processes one unit at a time; keep a small pipeline so the pipe stays full.
+    // Coldcard JS workers can fan out across the whole pool.
+    const pipeline =
+      grind.pace === 'light'
+        ? 1
+        : useColdcardWorkers
+          ? maxInflight
+          : pool.backendName === 'native'
+            ? Math.min(maxInflight, 3)
+            : maxInflight;
+
+    const yieldLoop = async () => {
+      if (throttle > 0) await new Promise((r) => setTimeout(r, throttle));
+      else await new Promise((r) => setImmediate(r));
+    };
+
     while (!this.stopRequested) {
+      if (useColdcardWorkers && coldcardCfg) {
+        // Work unit = RNG seed state. Expand happens in workers:
+        //   state → Yasmarang entropy → BIP39 → BIP32 → common paths → match
+        const { seeds, nextCursor, done } = generateColdcardSeeds(coldcardCfg, cursor, batch);
+        cursor = nextCursor;
+        this.cursor = cursor;
+        if (seeds.length) {
+          const nSeeds = seeds.length;
+          const job = pool
+            .runColdcard(workerCfg!, seeds)
+            .then((r) => this.onBatch(source, r.matches, r.checked, cursor, nSeeds));
+          inflight.push(job);
+          if (inflight.length >= pipeline) await inflight.shift();
+        }
+        await yieldLoop();
+        if (done) break;
+        continue;
+      }
+
+      if (useRange && source.rangeBatch) {
+        const { range, nextCursor, done } = source.rangeBatch(cursor, batch);
+        cursor = nextCursor;
+        this.cursor = cursor;
+        if (range && range.count > 0) {
+          const job = pool
+            .runRange(range)
+            .then((r) => this.onBatch(source, r.matches, r.checked, cursor, 0));
+          inflight.push(job);
+          if (inflight.length >= pipeline) await inflight.shift();
+        }
+        await yieldLoop();
+        if (done) break;
+        continue;
+      }
+
       const { items, nextCursor, done } = source.generate(cursor, batch);
       cursor = nextCursor;
+      this.cursor = cursor;
       if (items.length) {
         const job = pool
           .run(items)
-          .then((r) => this.onBatch(source, items, r.matches, r.checked, cursor));
+          .then((r) => this.onBatch(source, r.matches, r.checked, cursor, 0));
         inflight.push(job);
-        if (inflight.length >= maxInflight) await inflight.shift();
+        if (inflight.length >= pipeline) await inflight.shift();
       }
-      await new Promise((r) => setImmediate(r));
+      await yieldLoop();
       if (done) break;
     }
     await Promise.all(inflight);
     this.running = false;
-    audit('grind-stop', { source: source.name, keysTried: this.keysTried, hits: this.hits });
+    audit('grind-stop', {
+      source: source.name,
+      keysTried: this.keysTried,
+      seedsTried: this.seedsTried || undefined,
+      hits: this.hits
+    });
     await pool.stop();
   }
 
-  private async onBatch(source: GrindSource, items: KeyCandidate[], matches: Match[], checked: number, cursor: bigint): Promise<void> {
+  private async onBatch(
+    source: GrindSource,
+    matches: Match[],
+    checked: number,
+    cursor: bigint,
+    seedsInBatch: number
+  ): Promise<void> {
     this.keysTried += checked;
+    if (seedsInBatch > 0) this.seedsTried += seedsInBatch;
+    this.cursor = cursor;
 
-    // Rolling keys/sec sample.
+    // Rolling rate sample.
     const now = Date.now();
     const dt = now - this.lastRateSample.t;
     if (dt >= 1000) {
       this.keysPerSec = ((this.keysTried - this.lastRateSample.keys) * 1000) / dt;
-      this.lastRateSample = { t: now, keys: this.keysTried };
+      this.seedsPerSec = ((this.seedsTried - this.lastRateSample.seeds) * 1000) / dt;
+      this.lastRateSample = { t: now, keys: this.keysTried, seeds: this.seedsTried };
     }
 
     // Persist progress periodically (cheap; keys_tried + cursor for resume).
+    // Cursor is seed index for coldcard, key offset for sequential sources.
     const db = openDb();
     db.prepare(`UPDATE grind_source SET keys_tried=?, cursor=? WHERE name=?`).run(
       this.keysTried,
@@ -147,11 +310,20 @@ class GrinderEngine {
     const db = openDb();
     const target = findTargetByMatch(m.matched, m.kind);
 
-    // Recompute the live balance for the matched target before doing anything.
-    let balance = 0;
-    let script = target?.script_hex ?? null;
-    if (!script && target?.hash160) script = p2pkhScript(target.hash160);
-    if (script) balance = await scriptBalance(script).catch(() => 0);
+    // Snapshot balance from the richlist/index (may be a day old); live node is truth.
+    const snapshotBalance = target?.last_balance ?? null;
+    const script = target ? scriptForTarget(target) : null;
+    let liveBalance: number | null = null;
+    if (script) {
+      try {
+        liveBalance = await scriptBalance(script);
+      } catch {
+        liveBalance = null;
+      }
+    }
+    // Prefer live when available; fall back to snapshot for audit/context only.
+    // Sweeper still re-fetches UTXOs before any broadcast.
+    const balance = liveBalance ?? snapshotBalance ?? 0;
 
     audit('hit-found', {
       source: source.name,
@@ -161,7 +333,10 @@ class GrinderEngine {
       matched: m.matched,
       address: target?.address ?? null,
       dataset: target?.dataset ?? null,
-      balanceSats: balance
+      balanceSats: balance,
+      snapshotBalanceSats: snapshotBalance,
+      liveBalanceSats: liveBalance,
+      balanceSource: liveBalance !== null ? 'live' : snapshotBalance !== null ? 'snapshot' : 'none'
     });
 
     // Encrypt and store the key. If the vault isn't configured we still record
@@ -198,7 +373,30 @@ class GrinderEngine {
 
     // Hand off to the sweeper, which enforces policy (bucket, attestation,
     // dust, dry-run, destination) and updates the hit status.
-    await handleHit(hitId, source.bucket as Bucket, balance, m.privHex, target, privEnc !== '');
+    const decision = await handleHit(
+      hitId,
+      source.bucket as Bucket,
+      balance,
+      m.privHex,
+      target,
+      privEnc !== ''
+    );
+
+    // Realtime ops: webhook / notify file / shell hook (best-effort).
+    void notifyRescue({
+      event: 'hit-found',
+      ts: nowSec(),
+      source: source.name,
+      bucket: source.bucket,
+      origin: m.origin,
+      address: target?.address ?? null,
+      balanceSats: balance,
+      matchKind: m.kind,
+      status: decision.action,
+      action: decision.action,
+      reason: decision.reason,
+      txid: decision.txid ?? null
+    });
   }
 
   requestStop(): void {

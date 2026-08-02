@@ -21,6 +21,8 @@
 
   $: st = data.status;
   $: matchN = data.matchSet.size;
+  $: snap = data.richlistSnapshot;
+  $: snapAgeH = snap ? Math.round((Date.now() / 1000 - snap.createdAt) / 3600) : null;
 </script>
 
 <svelte:head><title>Grinder · satoshisearch</title></svelte:head>
@@ -33,12 +35,30 @@
     P2PK pubkeys). Every candidate is checked as compressed <em>and</em> uncompressed — the bug that
     made the old tool unable to match Satoshi's keys.
   </p>
+  {#if snap}
+    <p class="muted small">
+      Richlist snapshot: <span class="mono">{snap.source}</span>
+      · {bigCount(snap.rowCount ?? 0)} rows
+      · min {(snap.minSats / 1e8).toFixed(snap.minSats % 1e8 === 0 ? 0 : 2)} BTC
+      · policy <span class="mono">{snap.scriptPolicy}</span>
+      · age {snapAgeH}h
+      {#if snapAgeH !== null && snapAgeH > 36}<span class="warn"> (stale — re-run richlist:refresh)</span>{/if}
+    </p>
+  {:else}
+    <p class="muted small">
+      No richlist snapshot yet. Run
+      <span class="mono">npm run richlist:refresh</span>
+      (or <span class="mono">index:richlist</span> on a TSV) to load a balance-aware single-key set.
+    </p>
+  {/if}
 </div>
 
 <div class="honest">
-  <b>Honest math:</b> at ~10<sup>5</sup> keys/s across your cores, 2<sup>72</sup> alone is ~10<sup>8</sup>
-  years. Unbounded grinding never succeeds. Value comes only from classes whose <em>effective</em>
-  space is small — brainwallets, low-entropy, the ColdCard seed-state — plus the monitoring itself.
+  <b>Honest math:</b> sequential ranges (puzzle N) and weak-RNG sources (ColdCard) are different.
+  Puzzle work walks private-key integers. ColdCard walks <em>RNG seed states</em>, then BIP39→BIP32
+  derives keys that are still scattered across 256-bit space — not concentrated in [1, 2<sup>72</sup>).
+  Value comes from bounding the <em>effective work unit</em> (phrases, seed-state dims, small integers),
+  not from raw secp throughput alone.
 </div>
 
 {#if form?.error}<div class="err">{form.error}</div>{/if}
@@ -49,16 +69,50 @@
     {#if st.running}
       <div class="v"><span class="pulse"></span>Running · {st.sourceName}</div>
       <div class="metrics">
-        <div><span class="faint">keys/sec</span><b class="num">{st.keysPerSec.toLocaleString()}</b></div>
-        <div><span class="faint">tried</span><b class="num">{bigCount(st.keysTried)}</b></div>
+        {#if st.spaceKind === 'rng-states'}
+          <div><span class="faint">states/sec</span><b class="num">{(st.seedsPerSec ?? 0).toLocaleString()}</b></div>
+          <div><span class="faint">states tried</span><b class="num">{bigCount(st.seedsTried ?? 0)}</b></div>
+          <div><span class="faint">keys checked</span><b class="num">{bigCount(st.keysTried)}</b></div>
+        {:else}
+          <div><span class="faint">keys/sec</span><b class="num">{st.keysPerSec.toLocaleString()}</b></div>
+          <div><span class="faint">tried</span><b class="num">{bigCount(st.keysTried)}</b></div>
+        {/if}
         <div><span class="faint">workers</span><b class="num">{st.workers}</b></div>
+        <div><span class="faint">pace</span><b class="num mono">{st.pace ?? '—'}</b></div>
+        <div><span class="faint">backend</span><b class="num mono">{st.backend ?? '—'}</b></div>
         <div><span class="faint">hits</span><b class="num" class:btc={st.hits > 0}>{st.hits}</b></div>
       </div>
+      {#if st.pace === 'light'}
+        <p class="faint small rng-note">
+          Light pace — limited workers
+          {#if st.throttleMs != null && st.throttleMs > 0}
+            · {st.throttleMs}ms between batches
+          {/if}
+          · change in <a href="/settings">Settings → Grinder pace</a>.
+        </p>
+      {/if}
+      {#if st.spaceKind === 'rng-states' && st.rngSpace}
+        <p class="faint small rng-note">
+          Work unit = RNG seed state (not a sequential key).
+          {st.rngSpace.dimensions.map((d) => `${d.name}×${d.size}`).join(' · ')}
+          = {st.spaceSize ?? st.rngSpace.seedStates.toString()} states
+          × {st.rngSpace.keysPerSeed} HD keys/state.
+          {#if st.rngSpace.isDemoSlice}
+            <span class="warn"> Demo slice — pin uid/time for a real device.</span>
+          {/if}
+        </p>
+      {/if}
       <form method="POST" action="?/stop" use:enhance>
         <button class="stop">Stop</button>
       </form>
     {:else}
       <div class="v faint">Idle</div>
+      <p class="faint small rng-note">
+        Pace: <b class="mono">{data.grind.pace}</b>
+        · {data.grind.maxWorkers} workers
+        · {data.grind.throttleMs}ms throttle
+        · <a href="/settings">change</a>
+      </p>
       <form
         method="POST"
         action="?/start"
@@ -110,13 +164,30 @@
 <div class="card">
   <div class="k">Candidate sources</div>
   <table>
-    <thead><tr><th>Source</th><th>Bucket</th><th class="r">Space</th><th>What it is</th></tr></thead>
+    <thead>
+      <tr>
+        <th>Source</th>
+        <th>Bucket</th>
+        <th class="r">Work</th>
+        <th>Unit</th>
+        <th>What it is</th>
+      </tr>
+    </thead>
     <tbody>
       {#each data.sources as s}
         <tr class:disabled={!s.available}>
           <td>{s.label}</td>
           <td><span class="badge {s.bucket === 'puzzle' ? 'solved' : 'sealed'}">{s.bucket}</span></td>
-          <td class="num r">2<sup>{s.spaceBits.toFixed(0)}</sup></td>
+          <td class="num r">
+            {#if s.spaceKind === 'rng-states'}
+              ~2<sup>{s.spaceBits.toFixed(1)}</sup> states
+            {:else if s.spaceKind === 'phrase-list' || s.spaceKind === 'digit-windows'}
+              ~2<sup>{s.spaceBits.toFixed(0)}</sup>
+            {:else}
+              2<sup>{s.spaceBits.toFixed(0)}</sup> keys
+            {/if}
+          </td>
+          <td class="faint small mono">{s.spaceUnit ?? s.spaceKind}</td>
           <td class="faint small">{s.description}</td>
         </tr>
       {/each}
@@ -147,6 +218,16 @@
     padding: 10px 14px;
     border-radius: 8px;
     margin-bottom: 14px;
+  }
+  .warn {
+    color: #f0c674;
+  }
+  .rng-note {
+    margin: 10px 0 0;
+    line-height: 1.4;
+  }
+  .small {
+    font-size: 13px;
   }
   .grid {
     display: grid;
