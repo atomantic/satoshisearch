@@ -13,7 +13,7 @@
   ];
 
   $: path = $page.url.pathname;
-  const active = (href: string) => (href === '/' ? path === '/' : path.startsWith(href));
+  const active = (path: string, href: string) => (href === '/' ? path === '/' : path.startsWith(href));
 
   // Mobile menu toggle; closes on navigation.
   let menuOpen = false;
@@ -37,7 +37,7 @@
       </button>
       <nav class:open={menuOpen}>
         {#each nav as item}
-          <a href={item.href} class:active={active(item.href)}>{item.label}</a>
+          <a href={item.href} class:active={active(path, item.href)}>{item.label}</a>
         {/each}
       </nav>
     </div>

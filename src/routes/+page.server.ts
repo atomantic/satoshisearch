@@ -1,6 +1,6 @@
 import type { PageServerLoad } from './$types';
 import { openDb } from '$server/db';
-import { config } from '$server/config';
+import { effectiveRescue, effectiveRuntime } from '$server/settings';
 import { tipHeight } from '$server/mempool';
 
 export const load: PageServerLoad = async () => {
@@ -33,7 +33,7 @@ export const load: PageServerLoad = async () => {
   return {
     nodeOk,
     tipHeight: tip,
-    mempoolUrl: config.mempoolApiUrl,
+    mempoolUrl: effectiveRuntime().mempoolApiUrl,
     cards: {
       dormantKnown: (dormant?.c ?? 0) > 0,
       dormantCount: dormant?.c ?? 0,
@@ -43,7 +43,7 @@ export const load: PageServerLoad = async () => {
       puzzleSealed: puzzleAgg?.sealed ?? 0,
       bruteForceFrontier: sealedFundedMin?.n ? sealedFundedMin.n - 1 : 0,
       hits: hits?.c ?? 0,
-      autoBuckets: config.rescue.autoBuckets.size
+      autoBuckets: effectiveRescue().autoBuckets.size
     }
   };
 };

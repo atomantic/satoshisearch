@@ -10,9 +10,9 @@ balance APIs, no scraping):
 2. **Puzzle Tracker + Keyspace** — tracks the [Bitcoin puzzle series](https://btcpuzzle.info/puzzle)
    as an empirical gauge of how much of the keyspace the world has demonstrably searched, and
    visualizes that frontier against known weak-key depths.
-3. **Rescue** — a grinder for provably-weak key classes (e.g. the July 2026 ColdCard 72-bit entropy
-   flaw) that races attackers to recover funds, with a tamper-evident audit trail so rightful owners
-   can be identified and reimbursed.
+3. **Rescue** — a grinder for provably-weak key classes (e.g. the July 2026 ColdCard weak-RNG seed
+   states → BIP39/BIP32, not sequential 72-bit keys) that races attackers to recover funds, with a
+   tamper-evident audit trail so rightful owners can be identified and reimbursed.
 
 It is the successor to `satoshifinder` / `bitfinder` / `bitfinderlite`, rebuilt as a self-hosted
 Umbrel app.
@@ -29,7 +29,9 @@ always queries by **script hash** = `sha256(scriptPubKey)`. Verified: block-1000
 
 - **SvelteKit + TypeScript**, single Node container (adapter-node).
 - **`node:sqlite`** for storage — zero native database deps.
-- **`@noble/*` / `@scure/*`** for all crypto (secp256k1, hashes, base58, BIP32/39, tx signing).
+- **`@noble/*` / `@scure/*`** for wallet crypto (hashes, base58, BIP32/39, tx signing).
+- **Native grinder** (`native/grinder`, C + [libsecp256k1](https://github.com/bitcoin-core/secp256k1)) for the
+  keys/sec hot loop; falls back to JS workers if the binary is not built.
 - Talks to any mempool.space-compatible REST API — your local Umbrel node or the public instance.
 
 ## Development
@@ -37,10 +39,56 @@ always queries by **script hash** = `sha256(scriptPubKey)`. Verified: block-1000
 ```sh
 cp .env.example .env          # point MEMPOOL_API_URL at your node
 npm install
+npm run grind:build           # optional but recommended: native libsecp256k1 grinder
 npm run index:puzzles         # derive & classify all 256 puzzles from the chain
+npm run richlist:refresh      # fetch ≥1 BTC single-key richlist (loyce) + import
+npm run rescue:check          # pre-flight for a realtime weak-key race
 npm run dev                   # http://localhost:3117
 npm test                      # unit tests (script/P2PK primitives)
 ```
+
+Native grinder needs `cc`, `cmake`, `make`, and `git` once (clones libsecp256k1). Without it the
+app still runs using JS workers (`SATOSHI_GRIND_JS=1` forces that path). See `native/grinder/README.md`.
+
+For an always-on weak-key race (separate from the UI process):
+
+```sh
+npm run rescue:check
+npm run rescue:run -- --source coldcard --resume --refresh-hours 12
+# or: pm2 start ecosystem.config.cjs --only rescue-runner
+```
+
+See `docs/RESCUE-RUNNER.md` and `docs/RESCUE-POLICY.md`.
+
+### Richlist / grinder match-set
+
+The grinder matches candidates against a **local** set of funded single-key scripts
+(P2PK / P2PKH / P2WPKH), not by querying the node per address.
+
+**Production (own node, preferred):** parse a Bitcoin Core `dumptxoutset` file
+(Core ≥28 snapshot format). The dump is written on the Core host — copy it here, then:
+
+```sh
+# On Umbrel / Core host (path is on that machine):
+bitcoin-cli dumptxoutset /data/utxo-$(date +%F).dat
+# Or configure RPC in the Settings UI (saved to data/settings.json), then:
+#   npm run richlist:from-utxo -- --rpc-dump satoshisearch-utxo.dat
+
+# After copying the .dat file to this machine:
+npm run richlist:from-utxo -- --file /path/to/utxo.dat --import
+```
+
+**Bootstrap (third-party daily dump):**
+
+```sh
+npm run richlist:refresh                  # loyce ≥1 BTC single-key + import
+# or:
+npm run richlist:fetch -- --min-btc 1
+npm run index:richlist -- --replace datasets/balances-latest.tsv.gz --source loyce
+```
+
+On a hit, snapshot balance is audited and live Esplora is preferred for truth.
+See `plans/richlist-refresh.md` and `datasets/PROVENANCE.md`.
 
 ## Access over Tailscale
 

@@ -14,9 +14,19 @@
     "index:puzzles": "tsx scripts/index-puzzles.ts",
     "index:coinbase": "tsx scripts/index-coinbase.ts",
     "index:richlist": "tsx scripts/index-richlist.ts",
+    "richlist:fetch": "tsx scripts/fetch-loyce-richlist.ts",
+    "richlist:refresh": "tsx scripts/fetch-loyce-richlist.ts && tsx scripts/index-richlist.ts --replace datasets/balances-latest.tsv.gz --source loyce",
+    "richlist:from-utxo": "tsx scripts/dump-utxo-richlist.ts",
     "sweep": "tsx scripts/sweep.ts",
     "test": "tsx --test test/*.test.ts",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "grind:build": "make -C native/grinder",
+    "grind:selftest": "make -C native/grinder selftest",
+    "grind:bench": "make -C native/grinder bench",
+    "grind:bench:range": "make -C native/grinder && ./native/grinder/satoshi-grind --bench-range 500000",
+    "grind:bench:pool": "tsx scripts/bench-grind.ts",
+    "rescue:check": "tsx scripts/rescue-runner.ts check",
+    "rescue:run": "tsx scripts/rescue-runner.ts run"
   },
   "devDependencies": {
     "@sveltejs/adapter-node": "^5.2.0",

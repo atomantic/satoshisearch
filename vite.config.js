@@ -13,7 +13,8 @@ const extraHosts = (process.env.ALLOWED_HOSTS || '')
 export default defineConfig({
   plugins: [sveltekit()],
   server: {
-    port: 3117,
+    // Port comes from PORT (set by PM2 / ecosystem.config.cjs); 3117 standalone.
+    port: Number(process.env.PORT) || 3117,
     host: true,
     allowedHosts: ['.ts.net', 'localhost', ...extraHosts]
   }
