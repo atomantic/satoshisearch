@@ -12,6 +12,20 @@ import {
   lowEntropySource,
   type GrindSource
 } from './sources';
+import { coldcardSource, DEFAULT_COLDCARD_CONFIG, type ColdcardConfig } from './coldcard';
+import { bcdTime } from './yasmarang';
+
+/**
+ * Demo ColdCard config: one candidate uid, a small SysTick window, a one-hour
+ * creation window at minute resolution, and a small SSR range. Runnable out of
+ * the box; a real rescue narrows uid + time to the target device. The seed-state
+ * enumeration is exact — only the rng_get() consumption pattern is still assumed.
+ */
+function demoColdcardConfig(): ColdcardConfig {
+  const trValues: number[] = [];
+  for (let m = 0; m < 60; m++) trValues.push(bcdTime(14, m, 0));
+  return { ...DEFAULT_COLDCARD_CONFIG, uids: [0xdeadbeef], systick: [0, 1023], trValues, ssr: [0, 15] };
+}
 
 const datasetsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'datasets');
 
@@ -65,6 +79,8 @@ export function makeSource(id: string): GrindSource | null {
       return constantsSource('phi', CONSTANTS.phi);
     case 'lowentropy':
       return lowEntropySource(2_000_000);
+    case 'coldcard':
+      return coldcardSource(demoColdcardConfig());
     default:
       return null;
   }
@@ -125,10 +141,11 @@ export function listSources(): SourceInfo[] {
       id: 'coldcard',
       label: 'ColdCard 2026 (Yasmarang)',
       bucket: 'coldcard',
-      spaceBits: 56,
-      description: 'Enumerate the MicroPython Yasmarang fallback-RNG seed-state space (uid × SysTick × RTC). Awaiting the rng_get() consumption pattern to lock the exact entropy stream.',
-      available: false,
-      note: 'pending PRNG model confirmation'
+      spaceBits: Math.log2(1 * 1024 * 60 * 16), // demo slice: uid × SysTick × TR × SSR
+      description:
+        'Enumerate the MicroPython Yasmarang fallback-RNG seed-state space (uid × SysTick × RTC->TR × RTC->SSR), reproduce the BIP39 entropy stream, and derive standard paths. Demo config runs out of the box; a real rescue pins the target uid + creation-time window. Entropy stream assumes 4-byte-per-call consumption (pending device confirmation).',
+      available: true,
+      note: 'demo config — set target uid/time for a real device'
     }
   ];
 }

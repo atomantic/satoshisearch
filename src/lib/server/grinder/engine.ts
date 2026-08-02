@@ -94,8 +94,13 @@ class GrinderEngine {
     const inflight: Promise<void>[] = [];
     const maxInflight = pool.workerCount * 2;
 
+    // Some sources (coldcard) do heavy per-candidate work (BIP39 PBKDF2) inside
+    // generate() on this thread. Use a smaller batch for those and always yield
+    // to the event loop between batches so stop requests and web traffic are
+    // served even mid-grind.
+    const batch = source.bucket === 'coldcard' ? 250 : BATCH;
     while (!this.stopRequested) {
-      const { items, nextCursor, done } = source.generate(cursor, BATCH);
+      const { items, nextCursor, done } = source.generate(cursor, batch);
       cursor = nextCursor;
       if (items.length) {
         const job = pool
@@ -104,6 +109,7 @@ class GrinderEngine {
         inflight.push(job);
         if (inflight.length >= maxInflight) await inflight.shift();
       }
+      await new Promise((r) => setImmediate(r));
       if (done) break;
     }
     await Promise.all(inflight);
