@@ -12,7 +12,20 @@ node_modules/
 /data/*.db-*
 /data/vault/
 /data/*.local.json
+/data/settings.json
 
 # Rescue secrets must never be committed
 *.key
 secrets/
+
+# Large richlist dumps (fetch locally; do not commit multi‑MB/GB files)
+/datasets/balances-*.tsv
+/datasets/balances-*.tsv.gz
+/datasets/*.dat
+/data/utxo*.dat
+!/datasets/fixtures/
+
+# Native grinder build artifacts (secp256k1 is cloned on first `make`)
+/native/grinder/satoshi-grind
+/native/grinder/*.o
+/native/grinder/third_party/
