@@ -6,10 +6,24 @@
 import { Worker } from 'node:worker_threads';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { MatchSet, Match } from './matchset';
 import type { KeyCandidate } from './sources';
 
-const WORKER_URL = new URL('./worker.mjs', import.meta.url);
+/**
+ * Resolve worker.mjs in both worlds: next to this source file in dev, or in
+ * build/ (copied by the Dockerfile) once SvelteKit has bundled the server. The
+ * worker is plain ESM depending only on @noble, so plain node loads it in prod.
+ */
+function resolveWorkerPath(): string {
+  const beside = fileURLToPath(new URL('./worker.mjs', import.meta.url));
+  if (existsSync(beside)) return beside;
+  const built = join(process.cwd(), 'build', 'worker.mjs');
+  if (existsSync(built)) return built;
+  return beside; // let the Worker constructor surface a clear error
+}
+const WORKER_PATH = resolveWorkerPath();
 
 interface PendingJob {
   resolve: (v: { checked: number; matches: Match[] }) => void;
@@ -31,7 +45,7 @@ export class GrinderPool {
     for (let i = 0; i < this.size; i++) {
       // tsx registers its loader for worker threads in dev; in the adapter-node
       // build this .mjs is copied as-is and loaded by plain node.
-      const w = new Worker(fileURLToPath(WORKER_URL), {
+      const w = new Worker(WORKER_PATH, {
         execArgv: process.execArgv
       });
       w.on('message', (msg: { type: string; id?: number; checked?: number; matches?: Match[] }) => {

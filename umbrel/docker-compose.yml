@@ -1,0 +1,29 @@
+version: "3.7"
+
+services:
+  app_proxy:
+    environment:
+      APP_HOST: satoshisearch_web_1
+      APP_PORT: 3117
+
+  web:
+    image: ghcr.io/zapomatic/satoshisearch:v0.1.0
+    user: "1000:1000"
+    restart: on-failure
+    stop_grace_period: 1m
+    volumes:
+      - ${APP_DATA_DIR}/data:/app/data
+    environment:
+      # Talk to the local mempool app (dependency), never a third party.
+      MEMPOOL_API_URL: "http://${APP_MEMPOOL_IP}:${APP_MEMPOOL_PORT}"
+      DATA_DIR: "/app/data"
+      COINBASE_MAX_HEIGHT: "50000"
+      MEMPOOL_CONCURRENCY: "8"
+      # Vault key is generated once and persisted by exports.sh.
+      VAULT_KEY_HEX: "${APP_SATOSHISEARCH_VAULT_KEY}"
+      # Safe defaults: dry-run on, puzzle-only auto-sweep, no destination set.
+      SWEEP_DRY_RUN: "true"
+      SWEEP_AUTO_BUCKETS: "puzzle"
+      SWEEP_DUST_SATS: "10000"
+      RESCUE_DEST_ADDRESS: ""
+      RESCUE_WHITEHAT_ATTESTATION: ""

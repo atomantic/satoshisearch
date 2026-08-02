@@ -1,0 +1,43 @@
+manifestVersion: 1
+id: satoshisearch
+category: bitcoin
+name: SatoshiSearch
+version: "0.1.0"
+tagline: Keyspace observatory & white-hat key rescue
+description: >-
+  Watch Satoshi-era coins, track how much of Bitcoin's keyspace the world has
+  demonstrably searched, and race attackers to rescue provably-weak keys — all
+  against your own node.
+
+
+  SatoshiSearch talks only to your local mempool.space API (no third-party
+  balance services, no scraping). It correctly values early coinbase P2PK
+  outputs by script hash — the balances that address-based tools miss.
+
+
+  Features:
+    - Satoshi Watch: monitors the early block-reward coins and alerts the moment a dormant output moves
+    - Puzzle Tracker: derives all 256 Bitcoin puzzle outputs live from the chain and classifies them sealed / exposed / solved
+    - Keyspace Frontier: visualizes the demonstrated brute-force reach against known weak-key depths (brainwallet, ColdCard 72-bit, BIP39, ECDLP)
+    - Grinder: searches bounded weak-key classes across all CPU cores, matching compressed and uncompressed keys
+    - Rescue: on a hit, writes a tamper-evident hash-chained audit record and an owner-claim, encrypts the key at rest, and sweeps only per your policy
+
+  Auto-sweep is off by default except for the puzzle addresses (the one class
+  designed to be swept). Sweeping any other class requires an explicit white-hat
+  attestation, so recovered third-party funds can be returned to their owners.
+developer: Zap-O-Matic
+website: https://github.com/zapomatic/satoshisearch
+dependencies:
+  - mempool
+repo: https://github.com/zapomatic/satoshisearch
+support: https://github.com/zapomatic/satoshisearch/issues
+port: 3117
+gallery:
+  - 1.jpg
+  - 2.jpg
+  - 3.jpg
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+submitter: Zap-O-Matic
+submission: https://github.com/getumbrel/umbrel-apps/pulls
