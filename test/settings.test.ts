@@ -60,12 +60,10 @@ test('multi kangaroo runners list + remote resolve', async () => {
   process.env.DATA_DIR = dir;
   delete process.env.KANGAROO_SSH;
   try {
-    const { updateSettings, DEFAULT_KANGAROO_SSH_WRAPPER } = await import(
+    const { updateSettings, DEFAULT_KANGAROO_SSH_WRAPPER, DEFAULT_REMOTE_GRIND_BIN } = await import(
       '../src/lib/server/settings.ts'
     );
-    const { listKangarooRunners, pickRunners } = await import(
-      '../src/lib/server/grinder/kangaroo-runners.ts'
-    );
+    const { listDevices, pickDevices } = await import('../src/lib/server/grinder/devices.ts');
 
     updateSettings({
       kangaroo: {
@@ -83,7 +81,9 @@ test('multi kangaroo runners list + remote resolve', async () => {
             sshHost: '',
             sshOpts: '',
             remoteBin: '',
-            wrapperPath: ''
+            wrapperPath: '',
+            grindEnabled: true,
+            remoteGrindBin: ''
           },
           {
             id: 'gpu1',
@@ -98,7 +98,9 @@ test('multi kangaroo runners list + remote resolve', async () => {
             sshHost: 'gpu@3090.local',
             sshOpts: '-o BatchMode=yes',
             remoteBin: '/opt/Kangaroo/kangaroo',
-            wrapperPath: ''
+            wrapperPath: '',
+            grindEnabled: true,
+            remoteGrindBin: ''
           }
         ],
         mode: '',
@@ -115,17 +117,24 @@ test('multi kangaroo runners list + remote resolve', async () => {
       }
     });
 
-    const all = listKangarooRunners();
+    const all = listDevices();
     assert.equal(all.length, 2);
     const remote = all.find((r) => r.id === 'gpu1')!;
     assert.equal(remote.kind, 'remote-gpu');
     assert.equal(remote.sshHost, 'gpu@3090.local');
     assert.equal(remote.wrapperPathResolved, DEFAULT_KANGAROO_SSH_WRAPPER);
     assert.equal(remote.externalCmdResolved, `${DEFAULT_KANGAROO_SSH_WRAPPER} {pubkey} {lo} {hi}`);
-    assert.ok(remote.available); // wrapper exists in repo
+    assert.ok(remote.kangarooAvailable); // wrapper exists in repo
+    assert.ok(remote.grindAvailable);
+    assert.equal(remote.remoteGrindBinResolved, DEFAULT_REMOTE_GRIND_BIN);
+    assert.ok(remote.capabilities.includes('kangaroo'));
+    assert.ok(remote.capabilities.includes('grind'));
 
-    const picked = pickRunners(null);
-    assert.ok(picked.some((r) => r.id === 'gpu1'));
+    const kang = pickDevices('kangaroo', null);
+    assert.ok(kang.some((r) => r.id === 'gpu1'));
+    const grind = pickDevices('grind', null);
+    assert.ok(grind.some((r) => r.id === 'gpu1'));
+    assert.ok(grind.some((r) => r.id === 'cpu-local'));
   } finally {
     for (const [k, v] of Object.entries(prevEnv)) {
       if (v === undefined) delete process.env[k];

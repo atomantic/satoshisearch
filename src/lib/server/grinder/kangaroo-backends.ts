@@ -16,12 +16,12 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { effectiveGrind, effectiveKangaroo, type KangarooBackend } from '../settings';
 import {
-  listKangarooRunners,
-  pickRunners,
+  listDevices,
+  pickDevices,
   runnerToDispatch,
-  type ResolvedKangarooRunner,
+  type ResolvedDevice,
   type RunnerDispatchConfig
-} from './kangaroo-runners';
+} from './devices';
 
 export type KangarooProgress = {
   ops: number;
@@ -90,14 +90,14 @@ export function kangarooAvailability(): {
   available: boolean;
   detail: string;
   sshHost: string | null;
-  runners: ResolvedKangarooRunner[];
+  runners: ResolvedDevice[];
   enabledCount: number;
   availableCount: number;
 } {
-  const runners = listKangarooRunners();
+  const runners = listDevices();
   const enabled = runners.filter((r) => r.enabled);
-  const ready = enabled.filter((r) => r.available);
-  const anyReady = runners.filter((r) => r.available);
+  const ready = enabled.filter((r) => r.kangarooAvailable);
+  const anyReady = runners.filter((r) => r.kangarooAvailable);
 
   // Summary from primary ready runner (or first enabled / first overall).
   const primary = ready[0] ?? enabled[0] ?? runners[0] ?? null;
@@ -106,7 +106,7 @@ export function kangarooAvailability(): {
       backend: 'cpu',
       mode: 'cpu',
       available: false,
-      detail: 'no runners configured',
+      detail: 'no devices configured',
       sshHost: null,
       runners,
       enabledCount: 0,
@@ -117,7 +117,7 @@ export function kangarooAvailability(): {
   const remotes = ready.filter((r) => r.kind === 'remote-gpu').map((r) => r.sshHost);
   const detail =
     ready.length > 1
-      ? `${ready.length} runners ready · ${ready.map((r) => r.name).join(', ')}`
+      ? `${ready.length} devices ready · ${ready.map((r) => r.name).join(', ')}`
       : primary.detail;
 
   return {
@@ -617,7 +617,7 @@ export function runKangaroo(opts: KangarooSolveOpts): Run {
 }
 
 /** Run on a resolved multi-runner definition. */
-export function runKangarooOnRunner(runner: ResolvedKangarooRunner, opts: KangarooSolveOpts): Run {
+export function runKangarooOnRunner(runner: ResolvedDevice, opts: KangarooSolveOpts): Run {
   return runKangaroo({
     ...opts,
     runnerId: runner.id,
@@ -641,9 +641,9 @@ export function runKangarooMulti(
     onRunnerProgress?: (p: MultiKangarooProgress) => void;
   }
 ): Run {
-  const runners = pickRunners(runnerIds).filter((r) => r.available);
+  const runners = pickDevices('kangaroo', runnerIds);
   if (!runners.length) {
-    return failedRun('no available kangaroo runners — enable one in Settings');
+    return failedRun('no available kangaroo devices — enable one in Settings');
   }
   if (runners.length === 1) {
     const r = runners[0];
@@ -659,7 +659,7 @@ export function runKangarooMulti(
 }
 
 function runKangarooMultiImpl(
-  runners: ResolvedKangarooRunner[],
+  runners: ResolvedDevice[],
   opts: Omit<KangarooSolveOpts, 'config' | 'runnerId' | 'runnerName'> & {
     onRunnerProgress?: (p: MultiKangarooProgress) => void;
   }

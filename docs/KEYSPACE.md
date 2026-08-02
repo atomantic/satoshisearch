@@ -46,9 +46,10 @@ security:** see **[`KANGAROO-GPU.md`](./KANGAROO-GPU.md)**.
 
 Short local-GPU env sketch: [`scripts/kangaroo-jlp-example.env`](../scripts/kangaroo-jlp-example.env).
 
-UI: **Grinder → Pollard's kangaroo** and **Settings → Kangaroo backend**. Hits use the same vault /
-audit / rescue pipeline as sequential grinds. Honest math: deep exposed puzzles remain multi-GPU /
-pool-scale work — a 3090 is a large upgrade over a laptop, not a skip of the \(\sqrt{\cdot}\) barrier.
+UI: **Grinder** (pick an exposed target → Start uses kangaroo automatically) and
+**Settings → Compute devices**. Hits use the same vault / audit / rescue pipeline as sequential
+grinds. Honest math: deep exposed puzzles remain multi-GPU / pool-scale work — a 3090 is a large
+upgrade over a laptop, not a skip of the \(\sqrt{\cdot}\) barrier.
 
 ## Why this maps onto real threats
 

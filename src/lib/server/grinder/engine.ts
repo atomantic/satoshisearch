@@ -17,14 +17,15 @@ import { audit } from '../rescue/audit';
 import type { GrindSource, SpaceKind } from './sources';
 import type { Match } from './matchset';
 import { generateColdcardSeeds, type RngSpaceModel } from './coldcard';
+import { pickDevices, type ResolvedDevice } from './devices';
 
 export interface GrinderStatus {
   running: boolean;
   sourceName: string | null;
   bucket: Bucket | null;
   workers: number;
-  /** 'native' = satoshi-grind (libsecp256k1); 'js' = worker_threads + @noble. */
-  backend: 'native' | 'js' | 'none';
+  /** 'native' = satoshi-grind; 'js' = workers; 'multi' = local+remote devices. */
+  backend: 'native' | 'js' | 'multi' | 'none';
   /**
    * Derived private keys checked (after BIP32 etc.). For coldcard this is
    * paths×gap per seed — not the RNG-state progress denominator.
@@ -50,6 +51,8 @@ export interface GrinderStatus {
   /** Effective CPU pace (light/normal/full). */
   pace: GrindPace | null;
   throttleMs: number | null;
+  /** Device ids participating in the current grind. */
+  deviceIds: string[];
 }
 
 /** JS noble path is allocation-heavy; smaller batches keep latency low. */
@@ -78,6 +81,7 @@ class GrinderEngine {
   private rngSpace: RngSpaceModel | null = null;
   private pace: GrindPace | null = null;
   private throttleMs = 0;
+  private deviceIds: string[] = [];
 
   get status(): GrinderStatus {
     const kind = this.source?.spaceKind ?? null;
@@ -99,11 +103,17 @@ class GrinderEngine {
       startedAt: this.startedAt,
       rngSpace: this.rngSpace,
       pace: this.running ? this.pace : null,
-      throttleMs: this.running ? this.throttleMs : null
+      throttleMs: this.running ? this.throttleMs : null,
+      deviceIds: this.running ? [...this.deviceIds] : []
     };
   }
 
-  async start(source: GrindSource, resumeCursor = 0n): Promise<void> {
+  /**
+   * @param source candidate source
+   * @param resumeCursor optional resume offset
+   * @param deviceIds optional grind-capable devices; omit = all enabled grind devices
+   */
+  async start(source: GrindSource, resumeCursor = 0n, deviceIds?: string[]): Promise<void> {
     if (this.running) await this.stop();
     this.source = source;
     this.running = true;
@@ -122,9 +132,14 @@ class GrinderEngine {
     this.pace = grind.pace;
     this.throttleMs = grind.throttleMs;
 
+    // Coldcard expand is local-only (PBKDF2); still accept device list but remotes
+    // are ignored by the pool for coldcard jobs.
+    const devices: ResolvedDevice[] = pickDevices('grind', deviceIds);
+
     const set = loadMatchSet();
     this.pool = new GrinderPool();
-    await this.pool.start(set);
+    await this.pool.start(set, devices.length ? devices : undefined);
+    this.deviceIds = this.pool.activeDeviceIds;
 
     audit('grind-start', {
       source: source.name,
@@ -132,6 +147,7 @@ class GrinderEngine {
       matchSetSize: set.size,
       workers: this.pool.workerCount,
       backend: this.pool.backendName,
+      devices: this.deviceIds,
       pace: grind.pace,
       throttleMs: grind.throttleMs,
       maxWorkers: grind.maxWorkers,

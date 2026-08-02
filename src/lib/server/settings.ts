@@ -77,7 +77,7 @@ export interface AppSettings {
   kangaroo: {
     /**
      * Multi-runner list (preferred). When empty, legacy single-slot fields below
-     * are migrated at read time by listKangarooRunners().
+     * are migrated at read time by listDevices().
      */
     runners: KangarooRunnerConfig[];
     /**
@@ -115,7 +115,10 @@ export type KangarooBackend = 'cpu' | 'jlp' | 'external';
 /** Operator-facing kangaroo runner mode (Settings UI). */
 export type KangarooMode = 'cpu' | 'local-gpu' | 'remote-gpu' | 'custom';
 
-/** One kangaroo solver endpoint (local CPU/CUDA or remote SSH GPU). */
+/**
+ * One compute device (local CPU/CUDA or remote SSH host).
+ * Used for kangaroo ECDLP and optionally sequential grind over the same fleet.
+ */
 export type KangarooRunnerConfig = {
   id: string;
   name: string;
@@ -128,13 +131,23 @@ export type KangarooRunnerConfig = {
   externalCmd: string;
   sshHost: string;
   sshOpts: string;
+  /** Remote JeanLucPons / kangaroo binary. */
   remoteBin: string;
   wrapperPath: string;
+  /**
+   * When true, this device may receive sequential grind work (local pool or
+   * remote satoshi-grind over SSH). Defaults true for cpu/local-gpu.
+   */
+  grindEnabled: boolean;
+  /** Remote path to satoshi-grind when grindEnabled on a remote host. */
+  remoteGrindBin: string;
 };
 
 /** Default local wrapper for remote-gpu mode. */
 export const DEFAULT_KANGAROO_SSH_WRAPPER = 'scripts/kangaroo-ssh-wrapper.sh';
 export const DEFAULT_KANGAROO_REMOTE_BIN = '/opt/Kangaroo/kangaroo';
+/** Default remote path for sequential grind on managed hosts. */
+export const DEFAULT_REMOTE_GRIND_BIN = '/opt/satoshi/satoshi-grind';
 
 /** Where an effective value came from, for the Settings page provenance badges. */
 export type SettingsSource = 'settings' | 'env' | 'mixed' | 'none';
@@ -196,15 +209,35 @@ export function kangarooBackendToMode(
   return 'cpu';
 }
 
-function normalizeRunnerConfig(raw: unknown): KangarooRunnerConfig | null {
+/** Runs on the observatory itself — no SSH, local binaries and worker threads. */
+export function isLocalKind(kind: KangarooMode): boolean {
+  return kind === 'cpu' || kind === 'local-gpu';
+}
+
+/** Local kinds grind by default; remotes/custom opt in so we never assume a binary. */
+export function defaultGrindEnabled(kind: KangarooMode): boolean {
+  return isLocalKind(kind);
+}
+
+/**
+ * Coerce stored/posted device config into its canonical shape.
+ * `fallbackId` supplies an id when the raw record has none (new devices);
+ * without it a record missing an id is rejected.
+ */
+export function normalizeRunnerConfig(
+  raw: unknown,
+  fallbackId?: () => string
+): KangarooRunnerConfig | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const kind =
     normalizeKangarooMode(r.kind) ||
     kangarooBackendToMode(normalizeKangarooBackend(r.backend), String(r.sshHost ?? ''));
   if (!kind) return null;
-  const id = String(r.id ?? '').trim();
+  const id = String(r.id ?? '').trim() || fallbackId?.() || '';
   if (!id) return null;
+  const grindEnabled =
+    r.grindEnabled === undefined ? defaultGrindEnabled(kind) : Boolean(r.grindEnabled);
   return {
     id,
     name: String(r.name ?? id).trim() || id,
@@ -218,7 +251,9 @@ function normalizeRunnerConfig(raw: unknown): KangarooRunnerConfig | null {
     sshHost: String(r.sshHost ?? '').trim(),
     sshOpts: String(r.sshOpts ?? '').trim(),
     remoteBin: String(r.remoteBin ?? '').trim(),
-    wrapperPath: String(r.wrapperPath ?? '').trim()
+    wrapperPath: String(r.wrapperPath ?? '').trim(),
+    grindEnabled,
+    remoteGrindBin: String(r.remoteGrindBin ?? '').trim()
   };
 }
 
@@ -297,7 +332,7 @@ function normalize(raw: Partial<AppSettings> | null | undefined): AppSettings {
     },
     kangaroo: {
       runners: Array.isArray(kg.runners)
-        ? (kg.runners.map(normalizeRunnerConfig).filter(Boolean) as KangarooRunnerConfig[])
+        ? (kg.runners.map((r) => normalizeRunnerConfig(r)).filter(Boolean) as KangarooRunnerConfig[])
         : [],
       mode: normalizeKangarooMode(kg.mode),
       backend: normalizeKangarooBackend(kg.backend),

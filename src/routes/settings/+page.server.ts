@@ -23,17 +23,18 @@ import {
   normalizeKangarooMode,
   DEFAULT_KANGAROO_SSH_WRAPPER,
   DEFAULT_KANGAROO_REMOTE_BIN,
+  DEFAULT_REMOTE_GRIND_BIN,
   vaultKeyStatusView,
   generateVaultKey,
   type KangarooRunnerConfig
 } from '$server/settings';
 import { kangarooAvailability } from '$server/grinder/kangaroo-backends';
 import {
-  listKangarooRunners,
+  listDevices,
   emptyRunner,
   newRunnerId,
   migrateLegacyKangaroo
-} from '$server/grinder/kangaroo-runners';
+} from '$server/grinder/devices';
 import { spawnSync } from 'node:child_process';
 import { getBlockchainInfo, isRpcConfigured, resolveRpcAuth } from '$server/bitcoin/rpc';
 import { audit } from '$server/rescue/audit';
@@ -113,12 +114,13 @@ export const load: PageServerLoad = async () => {
       source: kangaroo.source,
       available: kangarooAvail.available,
       detail: kangarooAvail.detail,
-      runners: listKangarooRunners(),
+      runners: listDevices(),
       enabledCount: kangarooAvail.enabledCount,
       availableCount: kangarooAvail.availableCount,
       defaults: {
         wrapperPath: DEFAULT_KANGAROO_SSH_WRAPPER,
-        remoteBin: DEFAULT_KANGAROO_REMOTE_BIN
+        remoteBin: DEFAULT_KANGAROO_REMOTE_BIN,
+        remoteGrindBin: DEFAULT_REMOTE_GRIND_BIN
       },
       stored: loadSettings().kangaroo
     },
@@ -333,6 +335,7 @@ export const actions: Actions = {
     const kind = normalizeKangarooMode(String(data.get('kind') ?? 'cpu').trim()) || 'cpu';
     const name = String(data.get('name') ?? '').trim() || id;
     const enabled = data.get('enabled') === 'on';
+    const grindEnabled = data.get('grindEnabled') === 'on';
     const jlpBin = String(data.get('jlpBin') ?? '').trim();
     const jlpExtraArgs = String(data.get('jlpExtraArgs') ?? '').trim();
     const jlpGpuId = String(data.get('jlpGpuId') ?? '').trim();
@@ -341,16 +344,17 @@ export const actions: Actions = {
     const sshHost = String(data.get('sshHost') ?? '').trim();
     const sshOpts = String(data.get('sshOpts') ?? '').trim();
     const remoteBin = String(data.get('remoteBin') ?? '').trim();
+    const remoteGrindBin = String(data.get('remoteGrindBin') ?? '').trim();
     const wrapperPath = String(data.get('wrapperPath') ?? '').trim();
 
     if (kind === 'remote-gpu' && !sshHost) {
-      return fail(400, { error: 'Remote GPU requires an SSH host (user@host).' });
+      return fail(400, { error: 'Remote host requires an SSH host (user@host).' });
     }
     if (kind === 'local-gpu' && !jlpBin) {
       return fail(400, { error: 'Local CUDA requires a binary path.' });
     }
     if (kind === 'custom' && !externalCmd) {
-      return fail(400, { error: 'Custom runner requires a command template.' });
+      return fail(400, { error: 'Custom device requires a command template.' });
     }
 
     const runner: KangarooRunnerConfig = emptyRunner({
@@ -358,6 +362,7 @@ export const actions: Actions = {
       name,
       kind,
       enabled,
+      grindEnabled,
       jlpBin,
       jlpExtraArgs,
       jlpGpuId,
@@ -366,6 +371,7 @@ export const actions: Actions = {
       sshHost,
       sshOpts,
       remoteBin,
+      remoteGrindBin,
       wrapperPath
     });
 
@@ -376,14 +382,17 @@ export const actions: Actions = {
     else runners.push(runner);
 
     updateSettings({ kangaroo: { ...cur.kangaroo, runners } });
-    audit('settings-kangaroo-runner-saved', {
+    audit('settings-device-saved', {
       id: runner.id,
       name: runner.name,
       kind: runner.kind,
       enabled: runner.enabled,
+      grindEnabled: runner.grindEnabled,
       sshHost: runner.sshHost || null
     });
-    return { done: `Saved runner “${runner.name}” (${runner.kind}${runner.enabled ? ', enabled' : ', disabled'}).` };
+    return {
+      done: `Saved device “${runner.name}” (${runner.kind}${runner.enabled ? ', enabled' : ', disabled'}${runner.grindEnabled ? ', grind' : ''}).`
+    };
   },
 
   deleteKangarooRunner: async ({ request }) => {
@@ -397,20 +406,20 @@ export const actions: Actions = {
     }
     updateSettings({ kangaroo: { ...cur.kangaroo, runners } });
     audit('settings-kangaroo-runner-deleted', { id });
-    return { done: `Removed runner ${id}.` };
+    return { done: `Removed device ${id}.` };
   },
 
   toggleKangarooRunner: async ({ request }) => {
     const data = await request.formData();
     const id = String(data.get('id') ?? '').trim();
     const enabled = data.get('enabled') === 'on' || data.get('enabled') === 'true';
-    if (!id) return fail(400, { error: 'missing runner id' });
+    if (!id) return fail(400, { error: 'missing device id' });
     const cur = loadSettings();
     const runners = migrateLegacyKangaroo(cur.kangaroo).map((r) =>
       r.id === id ? { ...r, enabled } : r
     );
     updateSettings({ kangaroo: { ...cur.kangaroo, runners } });
-    return { done: `${enabled ? 'Enabled' : 'Disabled'} runner ${id}.` };
+    return { done: `${enabled ? 'Enabled' : 'Disabled'} device ${id}.` };
   },
 
   testKangarooRemote: async ({ request }) => {
@@ -419,9 +428,11 @@ export const actions: Actions = {
     const sshOpts = String(data.get('sshOpts') ?? '').trim();
     const remoteBin =
       String(data.get('remoteBin') ?? '').trim() || DEFAULT_KANGAROO_REMOTE_BIN;
+    const remoteGrindBin = String(data.get('remoteGrindBin') ?? '').trim();
+    const grindEnabled = data.get('grindEnabled') === 'on';
 
     if (!sshHost) {
-      return fail(400, { error: 'SSH host is empty — set user@gpu-box first.' });
+      return fail(400, { error: 'SSH host is empty — set user@host first.' });
     }
 
     // Custom opts are layered on top of the defaults rather than replacing them:
@@ -436,6 +447,11 @@ export const actions: Actions = {
       'ConnectTimeout=8'
     ];
 
+    const grindProbe =
+      grindEnabled && remoteGrindBin
+        ? `echo '--- grind ---'; command -v '${remoteGrindBin}' && '${remoteGrindBin}' --help 2>&1 | head -5; `
+        : '';
+
     const probe = spawnSync(
       'ssh',
       [
@@ -444,7 +460,7 @@ export const actions: Actions = {
         // /usr/lib/wsl/lib holds nvidia-smi on WSL2 hosts; WSL only puts it on
         // PATH for shells it launches itself, so an ssh session misses it and
         // the probe reports no GPU even when the remote kangaroo sees one.
-        `export PATH="$PATH:/usr/lib/wsl/lib"; nvidia-smi -L 2>/dev/null; command -v '${remoteBin}' && '${remoteBin}' -l 2>/dev/null | head -20; echo __SS_OK__`
+        `export PATH="$PATH:/usr/lib/wsl/lib"; nvidia-smi -L 2>/dev/null; command -v '${remoteBin}' && '${remoteBin}' -l 2>/dev/null | head -20; ${grindProbe}echo __SS_OK__`
       ],
       { encoding: 'utf8', timeout: 20_000 }
     );
@@ -465,9 +481,9 @@ export const actions: Actions = {
     }
 
     const clean = out.replace(/\n?__SS_OK__\n?/g, '').trim();
-    audit('settings-kangaroo-remote-test', { sshHost, remoteBin, ok: true });
+    audit('settings-device-remote-test', { sshHost, remoteBin, remoteGrindBin, ok: true });
     return {
-      done: `Remote GPU probe OK · ${sshHost}\n${clean.slice(0, 800) || '(connected; no nvidia-smi / -l output)'}`
+      done: `Remote host probe OK · ${sshHost}\n${clean.slice(0, 800) || '(connected; no nvidia-smi / -l output)'}`
     };
   },
 

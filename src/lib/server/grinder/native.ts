@@ -10,7 +10,7 @@
  *   ← RESULT { id:u32, checked:u32, n:u32, matches... }
  *   ← ERROR  { message bytes }
  */
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { availableParallelism } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,7 +29,8 @@ const MSG_RANGE = 6;
 
 const KIND_NAMES = ['hash160-compressed', 'hash160-uncompressed', 'pubkey'] as const;
 
-function resolveBinary(): string | null {
+/** Local satoshi-grind path: env override, then build outputs. Null when unbuilt. */
+export function resolveBinary(): string | null {
   const env = process.env.SATOSHI_GRIND_BIN;
   if (env && existsSync(env)) return env;
 
@@ -86,23 +87,53 @@ interface Pending {
   range?: RangeBatch;
 }
 
+/** How to spawn satoshi-grind — local binary or SSH remote. */
+export type NativeSpawnSpec =
+  | { mode: 'local'; binary?: string; threads: number }
+  | {
+      mode: 'ssh';
+      /** Full ssh argv before the remote binary, e.g. opts + host. */
+      sshArgv: string[];
+      /** Remote path to satoshi-grind. */
+      remoteBinary: string;
+      threads: number;
+      /** Device id for logging. */
+      deviceId?: string;
+      deviceName?: string;
+    };
+
 /**
  * One long-lived native process with an internal thread pool.
+ * Speaks the same protocol over a local binary or `ssh host satoshi-grind`.
  */
 export class NativeGrindPool {
-  private proc: ChildProcessWithoutNullStreams | null = null;
+  private proc: ChildProcess | null = null;
   private buf = Buffer.alloc(0);
   private pending = new Map<number, Pending>();
   private jobId = 0;
   private ready: Promise<void> | null = null;
   private threads: number;
-  private binary: string;
+  private spawnSpec: NativeSpawnSpec;
+  private label: string;
 
-  constructor(threads = Math.max(1, availableParallelism() - 1)) {
-    this.threads = threads;
-    const bin = resolveBinary();
-    if (!bin) throw new Error('satoshi-grind binary not found — run: make -C native/grinder');
-    this.binary = bin;
+  constructor(
+    threadsOrSpec: number | NativeSpawnSpec = Math.max(1, availableParallelism() - 1)
+  ) {
+    const spec: NativeSpawnSpec =
+      typeof threadsOrSpec === 'number'
+        ? { mode: 'local', threads: threadsOrSpec }
+        : threadsOrSpec;
+    this.threads = spec.threads;
+
+    if (spec.mode === 'local') {
+      const binary = spec.binary || resolveBinary();
+      if (!binary) throw new Error('satoshi-grind binary not found — run: make -C native/grinder');
+      this.spawnSpec = { ...spec, binary };
+      this.label = 'local';
+    } else {
+      this.spawnSpec = spec;
+      this.label = spec.deviceName || spec.deviceId || 'ssh-remote';
+    }
   }
 
   get workerCount(): number {
@@ -113,10 +144,32 @@ export class NativeGrindPool {
     return 'native';
   }
 
+  get deviceLabel(): string {
+    return this.label;
+  }
+
   async start(set: MatchSet): Promise<void> {
-    this.proc = spawn(this.binary, ['--threads', String(this.threads)], {
-      stdio: ['pipe', 'pipe', 'inherit']
-    });
+    if (this.spawnSpec.mode === 'local') {
+      this.proc = spawn(this.spawnSpec.binary!, ['--threads', String(this.threads)], {
+        stdio: ['pipe', 'pipe', 'inherit']
+      });
+    } else {
+      // Binary protocol over SSH stdin/stdout — same frames as local.
+      const finalArgs = [
+        ...this.spawnSpec.sshArgv,
+        this.spawnSpec.remoteBinary,
+        '--threads',
+        String(this.threads)
+      ];
+      this.proc = spawn('ssh', finalArgs, {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+    }
+
+    const proc = this.proc;
+    if (!proc.stdin || !proc.stdout) {
+      throw new Error('satoshi-grind spawn missing stdio pipes');
+    }
 
     this.ready = new Promise<void>((resolve, reject) => {
       const onReady = () => {
@@ -128,23 +181,23 @@ export class NativeGrindPool {
         reject(err);
       };
       const cleanup = () => {
-        this.proc?.off('error', onErr);
+        proc.off('error', onErr);
       };
 
-      this.proc!.once('error', onErr);
+      proc.once('error', onErr);
       this._readyResolve = onReady;
       this._readyReject = onErr;
     });
 
-    this.proc.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
-    this.proc.on('exit', (code, signal) => {
+    proc.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
+    proc.on('exit', (code, signal) => {
       const err = new Error(`satoshi-grind exited (code=${code} signal=${signal})`);
       for (const p of this.pending.values()) p.reject(err);
       this.pending.clear();
       if (this._readyReject) this._readyReject(err);
     });
 
-    this.proc.stdin.write(frame(MSG_INIT, buildInitPayload(set)));
+    proc.stdin.write(frame(MSG_INIT, buildInitPayload(set)));
     await this.ready;
   }
 
@@ -218,7 +271,8 @@ export class NativeGrindPool {
   }
 
   run(candidates: KeyCandidate[]): Promise<{ checked: number; matches: Match[] }> {
-    if (!this.proc) return Promise.reject(new Error('native pool not started'));
+    const stdin = this.proc?.stdin;
+    if (!stdin) return Promise.reject(new Error('native pool not started'));
     const id = this.jobId++;
     const privs = Buffer.allocUnsafe(candidates.length * 32);
     const origins = new Array<string>(candidates.length);
@@ -229,7 +283,7 @@ export class NativeGrindPool {
     const payload = Buffer.concat([u32(id), u32(candidates.length), privs]);
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, origins });
-      this.proc!.stdin.write(frame(MSG_BATCH, payload), (err) => {
+      stdin.write(frame(MSG_BATCH, payload), (err) => {
         if (err) {
           this.pending.delete(id);
           reject(err);
@@ -240,14 +294,15 @@ export class NativeGrindPool {
 
   /** Sequential range — start + [0, count) generated and matched inside C. */
   runRange(range: RangeBatch): Promise<{ checked: number; matches: Match[] }> {
-    if (!this.proc) return Promise.reject(new Error('native pool not started'));
+    const stdin = this.proc?.stdin;
+    if (!stdin) return Promise.reject(new Error('native pool not started'));
     if (range.count <= 0) return Promise.resolve({ checked: 0, matches: [] });
     const id = this.jobId++;
     const startBuf = Buffer.from(bigToPriv(range.start));
     const payload = Buffer.concat([u32(id), u32(range.count), startBuf]);
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, range });
-      this.proc!.stdin.write(frame(MSG_RANGE, payload), (err) => {
+      stdin.write(frame(MSG_RANGE, payload), (err) => {
         if (err) {
           this.pending.delete(id);
           reject(err);
@@ -260,7 +315,7 @@ export class NativeGrindPool {
     if (!this.proc) return;
     const p = this.proc;
     this.proc = null;
-    p.stdin.end();
+    p.stdin?.end();
     await new Promise<void>((resolve) => {
       const t = setTimeout(() => {
         p.kill('SIGKILL');

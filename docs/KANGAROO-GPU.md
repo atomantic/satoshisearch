@@ -23,12 +23,14 @@ SatoshiSearch never embeds CUDA. It **spawns** one of:
 | `jlp` | [JeanLucPons/Kangaroo](https://github.com/JeanLucPons/Kangaroo) (or compatible) | GPU on the **same** host as the app |
 | `external` | Your command → JSONL on stdout | **Remote** GPU via SSH, forks, RCKangaroo, custom pools |
 
-Configure in **Settings → Kangaroo runners**: add any number of endpoints (local CPU, local CUDA,
-multiple remote GPUs). Toggle **enabled** per runner; Grinder races all enabled ready runners
-(first `found` wins, others cancel). Env (`KANGAROO_SSH`, …) can still inject an ad-hoc remote.
+Configure in **Settings → Compute devices**: add any number of endpoints (local CPU, local CUDA,
+multiple remote hosts). Toggle **enabled** per device; for kangaroo, Grinder races all enabled
+ready kangaroo-capable devices (first `found` wins, others cancel). Enable **Sequential grind**
+on a remote to fan BATCH/RANGE work over SSH to `satoshi-grind` on that host’s CPU. Env
+(`KANGAROO_SSH`, …) can still inject an ad-hoc remote.
 
-Per remote runner: SSH host, remote binary, GPU id, extra args, **Test** probe
-(`nvidia-smi -L` + `kangaroo -l`).
+Per remote device: SSH host, remote kangaroo binary, optional remote grind binary, GPU id,
+extra args, **Test** probe (`nvidia-smi -L` + `kangaroo -l` + optional grind binary).
 
 ---
 
@@ -73,12 +75,14 @@ Observatory keeps the UI/DB/vault. The GPU box only has the CUDA binary (and `ss
 
 On the **observatory**, use the UI:
 
-1. **Settings → Kangaroo runners → + Remote GPU**
-2. Name it (e.g. `GPU · Tailscale 3090`), set **SSH host** `user@100.x.x.x`, remote binary
-3. **Save runner** and leave **Enabled** checked
-4. **Test** until the probe succeeds (passwordless SSH required)
-5. Optionally keep **CPU (this machine)** enabled to race both
-6. **Grinder → Start kangaroo** (checkboxes select a subset; default = all enabled)
+1. **Settings → Compute devices → + Remote host**
+2. Name it (e.g. `GPU · Tailscale 3090`), set **SSH host** `user@100.x.x.x`, remote kangaroo binary
+3. Optionally enable **Sequential grind** and set the remote `satoshi-grind` path
+4. **Save device** and leave **Enabled** checked
+5. **Test** until the probe succeeds (passwordless SSH required)
+6. Optionally keep **CPU (this machine)** enabled to race both
+7. **Grinder** — pick an exposed puzzle target and **Start** (method is kangaroo automatically;
+   checkboxes select devices; default = all enabled for that capability)
 
 Or inject one remote via env (added to the runner list at runtime):
 
@@ -318,5 +322,5 @@ upgrade over a laptop; it is **not** “solve #140 overnight.” See frontier no
 | `scripts/gpu-runner-firewall.ps1` | Open TCP 22 to WSL (Hyper-V + standard firewall) |
 | `scripts/kangaroo-jlp-example.env` | Env template for topology A |
 | `scripts/kangaroo-external-echo.sh` | JSONL plumbing smoke test |
-| Settings UI | **Kangaroo backend** card |
-| Grinder UI | Start/stop kangaroo + live backend line |
+| Settings UI | **Compute devices** card |
+| Grinder UI | Unified target picker (auto kangaroo vs grind) + devices |

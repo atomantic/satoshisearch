@@ -81,11 +81,12 @@
   let grindThrottleMs =
     data.grind.stored.throttleMs != null ? String(data.grind.stored.throttleMs) : '';
 
-  // Kangaroo multi-runner editor
+  // Compute device editor (kangaroo + optional sequential grind)
   let editId = '';
   let editName = '';
   let editKind: 'cpu' | 'local-gpu' | 'remote-gpu' | 'custom' = 'remote-gpu';
   let editEnabled = true;
+  let editGrindEnabled = false;
   let editJlpBin = '';
   let editJlpExtra = '';
   let editJlpGpuId = '0';
@@ -94,14 +95,26 @@
   let editSshHost = '';
   let editSshOpts = '';
   let editRemoteBin = data.kangaroo.defaults.remoteBin;
+  let editRemoteGrindBin = data.kangaroo.defaults.remoteGrindBin;
   let editWrapper = data.kangaroo.defaults.wrapperPath;
   let showEditor = false;
 
+  /** Mirrors the server's default (settings.ts defaultGrindEnabled) for the preview checkbox. */
+  const grindsByDefault = (kind: typeof editKind) => kind === 'cpu' || kind === 'local-gpu';
+
   function startAdd(kind: typeof editKind = 'remote-gpu') {
     editId = '';
-    editName = kind === 'remote-gpu' ? 'GPU remote' : kind === 'cpu' ? 'CPU (this machine)' : kind === 'local-gpu' ? 'Local CUDA' : 'Custom';
+    editName =
+      kind === 'remote-gpu'
+        ? 'Remote host'
+        : kind === 'cpu'
+          ? 'CPU (this machine)'
+          : kind === 'local-gpu'
+            ? 'Local CUDA'
+            : 'Custom';
     editKind = kind;
     editEnabled = true;
+    editGrindEnabled = grindsByDefault(kind);
     editJlpBin = '';
     editJlpExtra = '';
     editJlpGpuId = '0';
@@ -110,6 +123,7 @@
     editSshHost = '';
     editSshOpts = '-o BatchMode=yes';
     editRemoteBin = data.kangaroo.defaults.remoteBin;
+    editRemoteGrindBin = data.kangaroo.defaults.remoteGrindBin;
     editWrapper = data.kangaroo.defaults.wrapperPath;
     showEditor = true;
   }
@@ -119,6 +133,7 @@
     editName = r.name;
     editKind = r.kind as typeof editKind;
     editEnabled = r.enabled;
+    editGrindEnabled = r.grindEnabled ?? grindsByDefault(r.kind as typeof editKind);
     editJlpBin = r.jlpBin;
     editJlpExtra = r.jlpExtraArgs;
     editJlpGpuId = r.jlpGpuId || '0';
@@ -127,6 +142,7 @@
     editSshHost = r.sshHost;
     editSshOpts = r.sshOpts;
     editRemoteBin = r.remoteBin || data.kangaroo.defaults.remoteBin;
+    editRemoteGrindBin = r.remoteGrindBin || data.kangaroo.defaults.remoteGrindBin;
     editWrapper = r.wrapperPath || data.kangaroo.defaults.wrapperPath;
     showEditor = true;
   }
@@ -548,11 +564,12 @@
 </div>
 
 <div class="card">
-  <div class="k">Kangaroo runners (CPU + multi GPU)</div>
+  <div class="k">Compute devices (grind + kangaroo)</div>
   <p class="faint small top-note">
-    Race one or more solvers on the same puzzle (first find wins).
+    Managed hosts for sequential grind and/or Pollard's kangaroo. Kangaroo races enabled solvers
+    (first find wins); grind fans BATCH/RANGE work across devices with grind enabled.
     Source: <b>{data.kangaroo.source}</b> ·
-    {data.kangaroo.availableCount}/{data.kangaroo.runners.length} ready ·
+    kangaroo {data.kangaroo.availableCount}/{data.kangaroo.runners.length} ready ·
     {data.kangaroo.enabledCount} enabled ·
     {#if data.kangaroo.available}<span class="ok-text">ready</span>{:else}<span class="warn">not ready</span>{/if}
   </p>
@@ -563,6 +580,7 @@
         <th>On</th>
         <th>Name</th>
         <th>Kind</th>
+        <th>Caps</th>
         <th>Target</th>
         <th>Status</th>
         <th></th>
@@ -583,6 +601,9 @@
           <td><b>{r.name}</b></td>
           <td class="mono faint">{r.kind}</td>
           <td class="mono small">
+            {#if r.capabilities?.length}{r.capabilities.join('+')}{:else}—{/if}
+          </td>
+          <td class="mono small">
             {#if r.kind === 'remote-gpu'}{r.sshHost || '—'}
             {:else if r.kind === 'local-gpu'}{r.jlpBin || '—'}
             {:else if r.kind === 'custom'}{r.externalCmd.slice(0, 40) || '—'}
@@ -591,6 +612,9 @@
           <td class="small">
             {#if r.available}<span class="ok-text">ready</span>{:else}<span class="warn">not ready</span>{/if}
             <span class="faint"> · {r.detail}</span>
+            {#if r.grindEnabled}
+              <span class="faint"> · {r.grindDetail}</span>
+            {/if}
           </td>
           <td class="r actions-cell">
             <button type="button" class="linkish" on:click={() => startEdit(r)}>Edit</button>
@@ -599,6 +623,8 @@
                 <input type="hidden" name="sshHost" value={r.sshHost} />
                 <input type="hidden" name="sshOpts" value={r.sshOpts} />
                 <input type="hidden" name="remoteBin" value={r.remoteBinResolved} />
+                <input type="hidden" name="remoteGrindBin" value={r.remoteGrindBinResolved} />
+                <input type="hidden" name="grindEnabled" value={r.grindEnabled ? 'on' : ''} />
                 <button type="submit" class="linkish" disabled={!!busy}>
                   {busy === testKey(r.id) ? 'Testing…' : 'Test'}
                 </button>
@@ -612,13 +638,13 @@
         </tr>
         {#if busy === testKey(r.id)}
           <tr class="probe-row">
-            <td colspan="6">
+            <td colspan="7">
               <div class="kang-probe faint">Probing {r.sshHost} over SSH — up to 20s…</div>
             </td>
           </tr>
         {:else if kangTestResult?.id === r.id}
           <tr class="probe-row">
-            <td colspan="6">
+            <td colspan="7">
               <div class="kang-probe" class:ok={kangTestResult.ok} class:bad={!kangTestResult.ok}>
                 {kangTestResult.text}
               </div>
@@ -633,10 +659,10 @@
   </table>
 
   <div class="actions" style="margin-top: 10px; gap: 8px; flex-wrap: wrap;">
-    <button type="button" class="secondary" on:click={() => startAdd('remote-gpu')}>+ Remote GPU</button>
+    <button type="button" class="secondary" on:click={() => startAdd('remote-gpu')}>+ Remote host</button>
     <button type="button" class="secondary" on:click={() => startAdd('cpu')}>+ CPU</button>
     <button type="button" class="secondary" on:click={() => startAdd('local-gpu')}>+ Local CUDA</button>
-    <button type="button" class="secondary" on:click={() => startAdd('custom')}>+ Custom</button>
+    <button type="button" class="secondary" on:click={() => startAdd('custom')}>+ Custom kangaroo</button>
   </div>
 
   {#if showEditor}
@@ -647,7 +673,7 @@
       use:enhance={track('save-kang-runner')}
     >
       <input type="hidden" name="id" value={editId} />
-      <h3 class="kang-edit-title">{editId ? 'Edit runner' : 'Add runner'}</h3>
+      <h3 class="kang-edit-title">{editId ? 'Edit device' : 'Add device'}</h3>
       <div class="rpc-grid">
         <label>
           <span>Name</span>
@@ -658,13 +684,17 @@
           <select name="kind" bind:value={editKind}>
             <option value="cpu">CPU (this machine)</option>
             <option value="local-gpu">Local CUDA</option>
-            <option value="remote-gpu">Remote GPU (SSH)</option>
-            <option value="custom">Custom JSONL command</option>
+            <option value="remote-gpu">Remote host (SSH)</option>
+            <option value="custom">Custom kangaroo JSONL</option>
           </select>
         </label>
         <label class="check full">
           <input type="checkbox" name="enabled" bind:checked={editEnabled} />
-          <span>Enabled for multi-runner races (Grinder default)</span>
+          <span>Enabled (included in Grinder device defaults)</span>
+        </label>
+        <label class="check full">
+          <input type="checkbox" name="grindEnabled" bind:checked={editGrindEnabled} />
+          <span>Sequential grind on this device (remote needs satoshi-grind)</span>
         </label>
 
         {#if editKind === 'remote-gpu'}
@@ -673,8 +703,12 @@
             <input name="sshHost" type="text" class="mono" bind:value={editSshHost} placeholder="user@100.120.88.104" autocomplete="off" />
           </label>
           <label class="full">
-            <span>Remote binary</span>
+            <span>Remote kangaroo binary</span>
             <input name="remoteBin" type="text" class="mono" bind:value={editRemoteBin} />
+          </label>
+          <label class="full">
+            <span>Remote grind binary <em class="faint">satoshi-grind</em></span>
+            <input name="remoteGrindBin" type="text" class="mono" bind:value={editRemoteGrindBin} />
           </label>
           <label>
             <span>GPU id</span>
@@ -685,11 +719,11 @@
             <input name="sshOpts" type="text" class="mono" bind:value={editSshOpts} />
           </label>
           <label class="full">
-            <span>Extra remote args</span>
+            <span>Extra kangaroo args</span>
             <input name="jlpExtraArgs" type="text" class="mono" bind:value={editJlpExtra} placeholder="-d 18 -ws -w /data/kang.work -wi 300" />
           </label>
           <label class="full">
-            <span>Local wrapper</span>
+            <span>Local kangaroo wrapper</span>
             <input name="wrapperPath" type="text" class="mono" bind:value={editWrapper} />
           </label>
           <input type="hidden" name="jlpUseGpu" value="on" />
@@ -719,11 +753,14 @@
       </div>
       <div class="actions">
         <button type="submit" disabled={!!busy}>
-          {busy === 'save-kang-runner' ? 'Saving…' : 'Save runner'}
+          {busy === 'save-kang-runner' ? 'Saving…' : 'Save device'}
         </button>
         <button type="button" class="secondary" on:click={() => (showEditor = false)}>Cancel</button>
       </div>
-      <p class="faint small">Guide: <span class="mono">docs/KANGAROO-GPU.md</span>. Enabled runners race together on Start kangaroo.</p>
+      <p class="faint small">
+        Guide: <span class="mono">docs/KANGAROO-GPU.md</span>.
+        Grinder picks method from the target (kangaroo for exposed puzzles, grind otherwise).
+      </p>
     </form>
   {/if}
 </div>

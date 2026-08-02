@@ -14,7 +14,7 @@ import {
   type KangarooRunResult,
   type MultiKangarooProgress
 } from './kangaroo-backends';
-import { listKangarooRunners, type ResolvedKangarooRunner } from './kangaroo-runners';
+import { listDevices, pickDevices, type ResolvedDevice } from './devices';
 import type { KangarooBackend } from '../settings';
 
 export type ExposedPuzzle = {
@@ -116,14 +116,14 @@ class KangarooEngine {
   private live = new Map<string, { status: string; ops: number; opsPerSec: number }>();
 
   private runnerSnapshot(): RunnerLiveStatus[] {
-    return listKangarooRunners().map((r) => {
+    return listDevices().map((r) => {
       const live = this.live.get(r.id);
       return {
         id: r.id,
         name: r.name,
         kind: r.kind,
         enabled: r.enabled,
-        available: r.available,
+        available: r.kangarooAvailable,
         detail: r.detail,
         sshHost: r.sshHost,
         status: live?.status ?? (this.running && this.activeRunnerIds.includes(r.id) ? 'running' : 'idle'),
@@ -162,13 +162,13 @@ class KangarooEngine {
     return listExposedFromDb();
   }
 
-  listRunners(): ResolvedKangarooRunner[] {
-    return listKangarooRunners();
+  listRunners(): ResolvedDevice[] {
+    return listDevices();
   }
 
   /**
    * @param puzzleN puzzle number
-   * @param runnerIds optional subset; omit / empty = all enabled+available
+   * @param runnerIds optional subset; omit / empty = all enabled kangaroo-capable devices
    */
   async start(puzzleN: number, runnerIds?: string[]): Promise<void> {
     if (this.running) await this.stop();
@@ -182,14 +182,9 @@ class KangarooEngine {
       throw new Error(`no exposed funded puzzle #${puzzleN} with stored pubkey`);
     }
 
-    const ids = runnerIds?.length ? runnerIds : undefined;
-    const selected = avail.runners.filter((r) => {
-      if (ids) return ids.includes(r.id);
-      return r.enabled && r.available;
-    });
-    const use = selected.filter((r) => r.available);
+    const use = pickDevices('kangaroo', runnerIds?.length ? runnerIds : undefined);
     if (!use.length) {
-      throw new Error('no available runners selected — enable at least one in Settings');
+      throw new Error('no available devices selected — enable at least one kangaroo-capable device in Settings');
     }
 
     this.running = true;

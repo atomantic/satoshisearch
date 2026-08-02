@@ -30,7 +30,7 @@ import { openDb } from './db';
  * Effective ECDLP work bits for an exposed puzzle: its range is 2^(n-1) wide and
  * Pollard's kangaroo needs ~2·√width group ops, i.e. ~2^(n/2).
  *
- * The single definition — the keyspace chart and the grinder's kangaroo card
+ * The single definition — the keyspace chart and the grinder's kangaroo jobs
  * both render this as "effective bits", so they must not compute it separately.
  */
 export function puzzleHalfBits(n: number): number {

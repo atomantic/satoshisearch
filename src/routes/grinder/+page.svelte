@@ -8,7 +8,11 @@
   export let data: PageData;
   export let form: ActionData;
 
-  let selected = data.sources.find((s) => s.available)?.id ?? '';
+  // Prefer first available kangaroo target, else first grind source.
+  let selected =
+    data.jobs.find((j) => j.available && j.method === 'kangaroo')?.id ??
+    data.jobs.find((j) => j.available)?.id ??
+    '';
 
   // Poll status while a grind or kangaroo is running so rates update live.
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -24,10 +28,11 @@
   $: matchN = data.matchSet.size;
   $: snap = data.richlistSnapshot;
   $: snapAgeH = snap ? Math.round((Date.now() / 1000 - snap.createdAt) / 3600) : null;
+  $: selectedJob = data.jobs.find((j) => j.id === selected) ?? null;
+  $: method = selectedJob?.method ?? 'grind';
+  $: isRunning = st.running || kg.running;
 
-  // Pollard's kangaroo is expected to land the key after ~2^halfBits group
-  // operations. That is a median, not a deadline — the search is probabilistic,
-  // so this reads as "time to reach the expected work at the current rate".
+  // Pollard's kangaroo ETA at current rate.
   $: expectedOps = kg.halfBits === null ? null : Math.pow(2, kg.halfBits);
   $: etaSeconds =
     expectedOps !== null && kg.opsPerSec > 0
@@ -40,10 +45,10 @@
 <div class="head">
   <h1>Key Grinder</h1>
   <p class="muted">
-    Generate candidate private keys from bounded weak-key classes and match them against
+    Pick a target and Start. <b>Exposed puzzles</b> use Pollard's kangaroo (ECDLP);
+    everything else walks keys sequentially against
     {bigCount(matchN)} watched targets ({bigCount(data.matchSet.hash160s)} hash160 · {data.matchSet.pubkeys}
-    P2PK pubkeys). Every candidate is checked as compressed <em>and</em> uncompressed — the bug that
-    made the old tool unable to match Satoshi's keys.
+    P2PK pubkeys). Managed devices (local CPU, remote hosts) run either job kind when capable.
   </p>
   {#if snap}
     <p class="muted small">
@@ -64,20 +69,20 @@
 </div>
 
 <div class="honest">
-  <b>Honest math:</b> sequential ranges (puzzle N) and weak-RNG sources (ColdCard) are different.
-  Puzzle work walks private-key integers. ColdCard walks <em>RNG seed states</em>, then BIP39→BIP32
-  derives keys that are still scattered across 256-bit space — not concentrated in [1, 2<sup>72</sup>).
-  Value comes from bounding the <em>effective work unit</em> (phrases, seed-state dims, small integers),
-  not from raw secp throughput alone.
+  <b>Honest math:</b> sequential ranges and weak-RNG sources are different from kangaroo.
+  Exposed puzzles with a known pubkey fall to ~2<sup>n/2</sup> ECDLP work on GPU/CPU solvers.
+  Sealed ranges and ColdCard walk keys or RNG states — the remote GPU's CUDA cores only help kangaroo;
+  its CPU can still join sequential grind when grind is enabled on that device.
 </div>
 
 {#if form?.error}<div class="err">{form.error}</div>{/if}
 
 <div class="grid">
-  <div class="card status-card" class:live={st.running}>
+  <div class="card status-card" class:live={isRunning} class:kang-live={kg.running}>
     <div class="k">Status</div>
+
     {#if st.running}
-      <div class="v"><span class="pulse"></span>Running · {st.sourceName}</div>
+      <div class="v"><span class="pulse"></span>Running · grind · {st.sourceName}</div>
       <div class="metrics">
         {#if st.spaceKind === 'rng-states'}
           <div><span class="faint">states/sec</span><b class="num">{(st.seedsPerSec ?? 0).toLocaleString()}</b></div>
@@ -92,6 +97,11 @@
         <div><span class="faint">backend</span><b class="num mono">{st.backend ?? '—'}</b></div>
         <div><span class="faint">hits</span><b class="num" class:btc={st.hits > 0}>{st.hits}</b></div>
       </div>
+      {#if st.deviceIds?.length}
+        <p class="faint small rng-note">
+          Devices: <span class="mono">{st.deviceIds.join(', ')}</span>
+        </p>
+      {/if}
       {#if st.pace === 'light'}
         <p class="faint small rng-note">
           Light pace — limited workers
@@ -115,6 +125,51 @@
       <form method="POST" action="?/stop" use:enhance>
         <button class="stop">Stop</button>
       </form>
+    {:else if kg.running}
+      <div class="v">
+        <span class="pulse kang-pulse"></span>Running · kangaroo · puzzle #{kg.puzzleN}
+        <span class="faint"> · {kg.activeRunnerIds?.length ?? 0} device(s)</span>
+      </div>
+      <div class="metrics">
+        <div><span class="faint">ops/sec (Σ)</span><b class="num">{kg.opsPerSec.toLocaleString()}</b></div>
+        <div><span class="faint">ops (Σ)</span><b class="num">{bigCount(kg.ops)}</b></div>
+        <div><span class="faint">DPs</span><b class="num">{bigCount(kg.dps)}</b></div>
+        <div><span class="faint">~work</span><b class="num">2<sup>{kg.halfBits}</sup></b></div>
+        <div
+          title="Time to reach the expected work at the current rate. The search is probabilistic — it can land far sooner or later."
+        >
+          <span class="faint">eta @ rate</span><b class="num">{duration(etaSeconds)}</b>
+        </div>
+        <div><span class="faint">hits</span><b class="num" class:btc={kg.hits > 0}>{kg.hits}</b></div>
+      </div>
+      <p class="target">
+        <span class="faint small">target</span>
+        {#if kg.addressLink}
+          <a class="mono addr" href={kg.addressLink} target="_blank" rel="noreferrer">{kg.address}</a>
+        {:else}
+          <span class="mono addr">{kg.address}</span>
+        {/if}
+        {#if kg.balance !== null}
+          <span class="bal btc">{btcShort(kg.balance)} BTC</span>
+        {/if}
+      </p>
+      <p class="faint small mono">{kg.backendDetail}</p>
+      {#if kg.runners?.length}
+        <ul class="runner-list">
+          {#each kg.runners as r}
+            {#if kg.activeRunnerIds?.includes(r.id)}
+              <li class:live={r.status === 'running'}>
+                <span class="dot" class:ok={r.available && r.enabled}></span>
+                <b>{r.name}</b>
+                <span class="mono"> · {Math.round(r.opsPerSec).toLocaleString()}/s · {r.status}</span>
+              </li>
+            {/if}
+          {/each}
+        </ul>
+      {/if}
+      <form method="POST" action="?/stop" use:enhance>
+        <button class="stop">Stop</button>
+      </form>
     {:else}
       <div class="v faint">Idle</div>
       <p class="faint small rng-note">
@@ -129,19 +184,91 @@
         against the same DB — stop it with
         <span class="mono">pm2 stop rescue-runner</span> if logs keep scrolling while this is Idle.
       </p>
+
       <form method="POST" action="?/start" use:enhance>
         <label class="sel">
-          <span class="faint">Source</span>
-          <select name="source" bind:value={selected}>
-            {#each data.sources as s}
-              <option value={s.id} disabled={!s.available}>
-                {s.label}{s.available ? '' : ' — ' + (s.note ?? 'unavailable')}
+          <span class="faint">Target</span>
+          <select name="job" bind:value={selected}>
+            {#each data.jobs as j}
+              <option value={j.id} disabled={!j.available}>
+                {#if j.method === 'kangaroo'}
+                  #{j.puzzleN} kangaroo · ~2^{j.halfBits} · {btcShort(j.balance ?? 0)} BTC
+                  {j.address ? ` · ${shortAddr(j.address)}` : ''}
+                {:else}
+                  {j.label}{j.available ? '' : ' — ' + (j.note ?? 'unavailable')}
+                {/if}
               </option>
             {/each}
           </select>
         </label>
-        <button class="btn-accent">Start grind</button>
+
+        {#if selectedJob}
+          <p class="method-hint faint small">
+            Method:
+            {#if method === 'kangaroo'}
+              <b>Pollard's kangaroo</b> (interval ECDLP)
+              {#if !kg.available}
+                <span class="warn"> — no kangaroo-ready devices</span>
+              {/if}
+            {:else}
+              <b>Sequential grind</b>
+            {/if}
+            {#if selectedJob.detail}
+              <span class="block-detail">{selectedJob.detail}</span>
+            {/if}
+          </p>
+        {/if}
+
+        {#if data.devices.length}
+          <fieldset class="runner-pick">
+            <legend class="faint">
+              Devices
+              {#if method === 'kangaroo'}
+                (race kangaroo; first find wins)
+              {:else}
+                (fan-out grind; remote needs satoshi-grind)
+              {/if}
+            </legend>
+            {#each data.devices as d}
+              {@const capOk = method === 'kangaroo' ? d.kangarooAvailable : d.grindAvailable}
+              <label class="runner-check" class:off={!capOk}>
+                <input
+                  type="checkbox"
+                  name="devices"
+                  value={d.id}
+                  checked={d.enabled && capOk}
+                  disabled={!capOk}
+                />
+                {d.name}
+                <span class="faint mono">
+                  ({d.kind}{d.sshHost ? ` · ${d.sshHost}` : ''})
+                </span>
+                {#if !capOk}
+                  <span class="warn">
+                    · {method === 'kangaroo' ? 'no kangaroo' : d.grindDetail || 'grind off'}
+                  </span>
+                {/if}
+              </label>
+            {/each}
+          </fieldset>
+        {:else}
+          <p class="warn small">
+            No devices configured —
+            <a href="/settings">Settings → Compute devices</a>.
+          </p>
+        {/if}
+
+        <button
+          class="btn-accent"
+          disabled={method === 'kangaroo' ? !kg.available : !selectedJob?.available}
+        >
+          Start
+        </button>
       </form>
+
+      {#if kg.lastResult && !st.running}
+        <p class="faint small">Last kangaroo: {kg.lastResult}</p>
+      {/if}
     {/if}
   </div>
 
@@ -170,121 +297,39 @@
       </li>
     </ul>
     <a href="/settings" class="faint small">Configure in Settings →</a>
+
+    <div class="k" style="margin-top: 16px;">Devices</div>
+    {#if data.devices.length}
+      <ul class="runner-list">
+        {#each data.devices as d}
+          <li class:off={!d.enabled}>
+            <span
+              class="dot"
+              class:ok={d.enabled && d.available}
+              class:warn={d.enabled && !d.available}
+            ></span>
+            <b>{d.name}</b>
+            <span class="faint mono">
+              · {d.capabilities?.length ? d.capabilities.join('+') : '—'}
+              {d.sshHost ? ` · ${d.sshHost}` : ''}
+            </span>
+          </li>
+        {/each}
+      </ul>
+      <a href="/settings" class="faint small">Manage devices →</a>
+    {:else}
+      <p class="faint small">None configured.</p>
+    {/if}
   </div>
 </div>
 
-<div class="card kang-card" class:live={kg.running}>
-  <div class="k">Pollard's kangaroo · exposed puzzles</div>
-  <p class="faint small kang-blurb">
-    Interval ECDLP for pubkey-known puzzles. Race <b>multiple runners</b> (local CPU + remote
-    GPUs): first find wins, others cancel. Configure in
-    <a href="/settings">Settings → Kangaroo runners</a>.
-  </p>
-  <p class="faint small mono">
-    {kg.backendDetail}
-  </p>
-  {#if kg.runners?.length}
-    <ul class="runner-list">
-      {#each kg.runners as r}
-        <li class:off={!r.enabled} class:live={r.status === 'running'}>
-          <span class="dot" class:ok={r.available && r.enabled} class:warn={!r.available}></span>
-          <b>{r.name}</b>
-          <span class="faint mono"> · {r.kind}{r.sshHost ? ` · ${r.sshHost}` : ''}</span>
-          {#if kg.running && kg.activeRunnerIds?.includes(r.id)}
-            <span class="mono"> · {Math.round(r.opsPerSec).toLocaleString()}/s · {r.status}</span>
-          {:else if !r.available}
-            <span class="warn"> · not ready</span>
-          {:else if !r.enabled}
-            <span class="faint"> · disabled</span>
-          {/if}
-        </li>
-      {/each}
-    </ul>
-  {/if}
-  {#if !kg.available}
-    <p class="warn small">
-      No ready runners — add/enable CPU or remote GPU in
-      <a href="/settings">Settings → Kangaroo runners</a>.
-    </p>
-  {:else if kg.running}
-    <div class="v">
-      <span class="pulse"></span>Running · puzzle #{kg.puzzleN}
-      <span class="faint"> · {kg.activeRunnerIds?.length ?? 0} runner(s)</span>
-    </div>
-    <div class="metrics">
-      <div><span class="faint">ops/sec (Σ)</span><b class="num">{kg.opsPerSec.toLocaleString()}</b></div>
-      <div><span class="faint">ops (Σ)</span><b class="num">{bigCount(kg.ops)}</b></div>
-      <div><span class="faint">DPs</span><b class="num">{bigCount(kg.dps)}</b></div>
-      <div><span class="faint">~work</span><b class="num">2<sup>{kg.halfBits}</sup></b></div>
-      <div title="Time to reach the expected work at the current rate. The search is probabilistic — it can land far sooner or later.">
-        <span class="faint">eta @ rate</span><b class="num">{duration(etaSeconds)}</b>
-      </div>
-      <div><span class="faint">hits</span><b class="num" class:btc={kg.hits > 0}>{kg.hits}</b></div>
-    </div>
-    <p class="target">
-      <span class="faint small">target</span>
-      {#if kg.addressLink}
-        <a class="mono addr" href={kg.addressLink} target="_blank" rel="noreferrer">{kg.address}</a>
-      {:else}
-        <span class="mono addr">{kg.address}</span>
-      {/if}
-      {#if kg.balance !== null}
-        <span class="bal btc">{btcShort(kg.balance)} BTC</span>
-      {/if}
-    </p>
-    <form method="POST" action="?/kangarooStop" use:enhance>
-      <button class="stop">Stop kangaroo</button>
-    </form>
-  {:else}
-    {#if data.kangarooTargets.length === 0}
-      <p class="faint small">
-        No exposed+funded puzzles with stored pubkeys. Re-index puzzles after the node is up.
-      </p>
-    {:else}
-      <form method="POST" action="?/kangarooStart" use:enhance>
-        <label class="sel">
-          <span class="faint">Exposed target</span>
-          <select name="puzzle">
-            {#each data.kangarooTargets as t}
-              <option value={t.n}>
-                #{t.n} · ~2^{t.halfBits} · {btcShort(t.balance)} BTC · {shortAddr(t.address)}
-              </option>
-            {/each}
-          </select>
-        </label>
-        {#if kg.runners?.length}
-          <fieldset class="runner-pick">
-            <legend class="faint">Runners (default = all enabled)</legend>
-            {#each kg.runners as r}
-              <label class="runner-check" class:off={!r.available}>
-                <input
-                  type="checkbox"
-                  name="runners"
-                  value={r.id}
-                  checked={r.enabled && r.available}
-                  disabled={!r.available}
-                />
-                {r.name}
-                <span class="faint mono">({r.kind}{r.sshHost ? ` · ${r.sshHost}` : ''})</span>
-              </label>
-            {/each}
-          </fieldset>
-        {/if}
-        <button class="btn-accent" disabled={!kg.available}>Start kangaroo</button>
-      </form>
-    {/if}
-    {#if kg.lastResult}
-      <p class="faint small">Last: {kg.lastResult}</p>
-    {/if}
-  {/if}
-</div>
-
 <div class="card">
-  <div class="k">Candidate sources</div>
+  <div class="k">Targets &amp; sources</div>
   <table>
     <thead>
       <tr>
-        <th>Source</th>
+        <th>Target</th>
+        <th>Method</th>
         <th>Bucket</th>
         <th class="r">Work</th>
         <th>Unit</th>
@@ -292,21 +337,28 @@
       </tr>
     </thead>
     <tbody>
-      {#each data.sources as s}
-        <tr class:disabled={!s.available}>
-          <td>{s.label}</td>
-          <td><span class="badge {s.bucket === 'puzzle' ? 'solved' : 'sealed'}">{s.bucket}</span></td>
+      {#each data.jobs as j}
+        <tr class:disabled={!j.available}>
+          <td>{j.label}</td>
+          <td>
+            <span class="badge {j.method === 'kangaroo' ? 'solved' : 'sealed'}">
+              {j.method === 'kangaroo' ? 'kangaroo' : 'grind'}
+            </span>
+          </td>
+          <td><span class="badge {j.bucket === 'puzzle' ? 'solved' : 'sealed'}">{j.bucket}</span></td>
           <td class="num r">
-            {#if s.spaceKind === 'rng-states'}
-              ~2<sup>{s.spaceBits.toFixed(1)}</sup> states
-            {:else if s.spaceKind === 'phrase-list' || s.spaceKind === 'digit-windows'}
-              ~2<sup>{s.spaceBits.toFixed(0)}</sup>
+            {#if j.method === 'kangaroo'}
+              ~2<sup>{j.halfBits}</sup>
+            {:else if j.spaceKind === 'rng-states'}
+              ~2<sup>{j.spaceBits.toFixed(1)}</sup> states
+            {:else if j.spaceKind === 'phrase-list' || j.spaceKind === 'digit-windows'}
+              ~2<sup>{j.spaceBits.toFixed(0)}</sup>
             {:else}
-              2<sup>{s.spaceBits.toFixed(0)}</sup> keys
+              2<sup>{j.spaceBits.toFixed(0)}</sup> keys
             {/if}
           </td>
-          <td class="faint small mono">{s.spaceUnit ?? s.spaceKind}</td>
-          <td class="faint small">{s.description}</td>
+          <td class="faint small mono">{j.spaceUnit ?? j.spaceKind}</td>
+          <td class="faint small">{j.detail}</td>
         </tr>
       {/each}
     </tbody>
@@ -329,15 +381,14 @@
     font-size: 13px;
     margin-bottom: 16px;
   }
-  .kang-card {
-    margin-bottom: 16px;
+  .method-hint {
+    margin: 0 0 10px;
+    line-height: 1.4;
   }
-  .kang-card.live {
-    border-color: rgba(255, 176, 32, 0.45);
-  }
-  .kang-blurb {
-    max-width: 780px;
-    margin: 6px 0 12px;
+  .block-detail {
+    display: block;
+    margin-top: 4px;
+    opacity: 0.9;
   }
   .runner-list {
     list-style: none;
@@ -424,9 +475,13 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
   }
   .status-card.live {
     border-color: rgba(123, 255, 160, 0.4);
+  }
+  .status-card.kang-live {
+    border-color: rgba(255, 176, 32, 0.45);
   }
   .pulse {
     width: 10px;
@@ -435,6 +490,10 @@
     background: var(--success);
     box-shadow: 0 0 0 0 var(--glow-success);
     animation: pulse 1.4s infinite;
+  }
+  .kang-pulse {
+    background: #ffb020;
+    box-shadow: 0 0 0 0 rgba(255, 176, 32, 0.5);
   }
   @keyframes pulse {
     0% {
@@ -471,8 +530,6 @@
     gap: 4px 8px;
     margin: 0 0 12px;
   }
-  /* Addresses are shown in full, so they have to be able to wrap rather than
-     push the card wider than the grid column. */
   .addr {
     font-size: 12px;
     word-break: break-all;
