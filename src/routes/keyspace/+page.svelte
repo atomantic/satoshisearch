@@ -61,6 +61,7 @@
       The 256-bit key space — searched, exposed, and safe
       {#if hover}<span class="hovertip">{hover.label} · {hover.sub}</span>{/if}
     </div>
+    <div class="axis-scroll">
     <svg viewBox="0 0 {W} {H}" class="axis" role="img" aria-label="Bit-depth frontier">
       <defs>
         <linearGradient id="solved" x1="0" y1="0" x2="1" y2="0">
@@ -121,6 +122,7 @@
         <text x={x(t)} y={axisY + 96} text-anchor={anc} class="lbl scale">{t}</text>
       {/each}
     </svg>
+    </div>
 
     <div class="insight">
       <span class="dot danger"></span>
@@ -241,6 +243,11 @@
     border-radius: 5px;
     border: 1px solid var(--border);
   }
+  .axis-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0 -4px;
+  }
   .axis {
     width: 100%;
     height: auto;
@@ -332,6 +339,12 @@
   @media (max-width: 820px) {
     .headline-row {
       grid-template-columns: 1fr;
+    }
+  }
+  /* Keep the bit-axis labels legible by scrolling rather than shrinking. */
+  @media (max-width: 640px) {
+    .axis {
+      min-width: 620px;
     }
   }
 </style>

@@ -84,7 +84,8 @@
   .card { margin-bottom: 14px; }
   .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-soft); margin-bottom: 10px; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; overflow-wrap: anywhere; }
+  .row .mono { word-break: break-all; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
   .dot.ok { background: var(--success); }
   .dot.bad { background: var(--danger); }

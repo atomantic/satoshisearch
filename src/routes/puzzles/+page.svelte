@@ -151,10 +151,13 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 10px;
   }
   .filters {
     display: flex;
     gap: 6px;
+    flex-wrap: wrap;
   }
   .filters button {
     text-transform: capitalize;

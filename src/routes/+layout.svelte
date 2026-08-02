@@ -14,6 +14,10 @@
 
   $: path = $page.url.pathname;
   const active = (href: string) => (href === '/' ? path === '/' : path.startsWith(href));
+
+  // Mobile menu toggle; closes on navigation.
+  let menuOpen = false;
+  $: if (path) menuOpen = false;
 </script>
 
 <div class="shell">
@@ -23,7 +27,15 @@
         <span class="logo">◎</span>
         <span class="name">satoshi<b>search</b></span>
       </a>
-      <nav>
+      <button
+        class="menu-toggle"
+        aria-label="Toggle navigation"
+        aria-expanded={menuOpen}
+        on:click={() => (menuOpen = !menuOpen)}
+      >
+        {#if menuOpen}✕{:else}☰{/if}
+      </button>
+      <nav class:open={menuOpen}>
         {#each nav as item}
           <a href={item.href} class:active={active(item.href)}>{item.label}</a>
         {/each}
@@ -92,6 +104,7 @@
     font-weight: 550;
     padding: 6px 11px;
     border-radius: 7px;
+    white-space: nowrap;
   }
   nav a:hover {
     color: var(--text);
@@ -102,6 +115,15 @@
     color: var(--primary);
     background: var(--surface);
   }
+  .menu-toggle {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 18px;
+    line-height: 1;
+    padding: 7px 12px;
+  }
   main {
     flex: 1;
     padding: 28px 24px 60px;
@@ -110,5 +132,39 @@
   footer {
     padding: 20px 24px 30px;
     font-size: 13px;
+  }
+
+  /* Mobile: collapse the nav behind a toggle so it never overlaps content. */
+  @media (max-width: 760px) {
+    .bar {
+      flex-wrap: wrap;
+      height: auto;
+      min-height: 56px;
+      padding-top: 10px;
+      padding-bottom: 10px;
+      gap: 12px;
+    }
+    .menu-toggle {
+      display: block;
+      margin-left: auto;
+    }
+    nav {
+      flex-basis: 100%;
+      flex-direction: column;
+      gap: 2px;
+      display: none;
+      padding-bottom: 6px;
+    }
+    nav.open {
+      display: flex;
+    }
+    nav a {
+      padding: 11px 12px;
+      font-size: 15px;
+      border-radius: 8px;
+    }
+    main {
+      padding: 20px 16px 48px;
+    }
   }
 </style>

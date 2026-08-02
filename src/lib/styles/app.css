@@ -207,3 +207,54 @@ button:hover,
 .btn-accent:hover {
   box-shadow: 0 0 16px var(--glow-primary);
 }
+
+/* ---------------------------------------------------------------------------
+ * Mobile / responsive
+ * These are global so every page inherits sane phone behavior. Grid collapses
+ * use a slightly higher specificity (html-prefixed) to win over Svelte-scoped
+ * page rules without !important.
+ * ------------------------------------------------------------------------- */
+@media (max-width: 760px) {
+  html,
+  body {
+    font-size: 13.5px;
+  }
+  .container {
+    padding: 0 16px;
+  }
+  .card {
+    padding: 15px;
+    border-radius: 9px;
+  }
+  h1 {
+    font-size: 22px;
+  }
+
+  /* Wide tables scroll horizontally instead of crushing their columns. */
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  th,
+  td {
+    padding: 8px 10px;
+  }
+}
+
+/* Phones: stat/tile grids stack to one column so big numbers never truncate.
+ * !important is used deliberately to override Svelte's scoped page grid rules,
+ * which carry higher specificity than any global selector could. */
+@media (max-width: 560px) {
+  .stats,
+  .grid,
+  .headline-row,
+  .two,
+  .pgrid,
+  .stats-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .metrics {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
