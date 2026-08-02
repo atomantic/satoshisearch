@@ -20,7 +20,7 @@ function loadState() {
               MAX(last_checked_at) lastChecked
        FROM target WHERE dataset IN ('coinbase','dormant')`
     )
-    .get() as Agg;
+    .get() as unknown as Agg;
 
   const indexedMax = db
     .prepare(`SELECT MAX(height) h FROM target WHERE dataset='coinbase'`)

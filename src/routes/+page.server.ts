@@ -6,8 +6,8 @@ import { tipHeight } from '$server/mempool';
 export const load: PageServerLoad = async () => {
   const db = openDb();
 
-  const q = (sql: string, ...args: unknown[]) =>
-    db.prepare(sql).get(...args) as Record<string, number> | undefined;
+  const q = (sql: string) =>
+    db.prepare(sql).get() as unknown as Record<string, number> | undefined;
 
   const dormant = q(
     `SELECT COUNT(*) c, COALESCE(SUM(last_balance),0) s FROM target WHERE dataset IN ('coinbase','dormant')`

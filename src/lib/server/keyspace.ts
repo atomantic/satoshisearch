@@ -84,7 +84,7 @@ export function analyzeKeyspace(): KeyspaceAnalysis {
   const db = openDb();
   const rows = db
     .prepare(`SELECT n, status, balance, solve_height FROM puzzle ORDER BY n`)
-    .all() as PuzzleRec[];
+    .all() as unknown as PuzzleRec[];
 
   const solved = rows.filter((r) => r.status === 'solved');
 

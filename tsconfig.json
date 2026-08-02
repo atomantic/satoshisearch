@@ -11,5 +11,6 @@
     "strict": true,
     "moduleResolution": "bundler",
     "target": "ES2022"
-  }
+  },
+  "exclude": ["test", "scripts", "node_modules", "build", ".svelte-kit"]
 }

@@ -49,7 +49,7 @@ export async function sweep(opts?: {
        WHERE dataset IN (${placeholders}) AND script_hex IS NOT NULL ${fundedClause}
        ORDER BY id`
     )
-    .all(...datasets) as TargetRow[];
+    .all(...datasets) as unknown as TargetRow[];
 
   const height = await tipHeight().catch(() => null);
 
