@@ -23,12 +23,12 @@ SatoshiSearch never embeds CUDA. It **spawns** one of:
 | `jlp` | [JeanLucPons/Kangaroo](https://github.com/JeanLucPons/Kangaroo) (or compatible) | GPU on the **same** host as the app |
 | `external` | Your command → JSONL on stdout | **Remote** GPU via SSH, forks, RCKangaroo, custom pools |
 
-Configure in **Settings → Kangaroo runner** (CPU / Local CUDA / Remote GPU / Custom) or env
-(`KANGAROO_*`). Env wins over file settings when both are set.
+Configure in **Settings → Kangaroo runners**: add any number of endpoints (local CPU, local CUDA,
+multiple remote GPUs). Toggle **enabled** per runner; Grinder races all enabled ready runners
+(first `found` wins, others cancel). Env (`KANGAROO_SSH`, …) can still inject an ad-hoc remote.
 
-The Settings page can **save & enable** a mode, store SSH host / remote binary / extra args, and
-**Test SSH + GPU** (runs `nvidia-smi -L` and `kangaroo -l` on the remote host without starting a
-solve).
+Per remote runner: SSH host, remote binary, GPU id, extra args, **Test** probe
+(`nvidia-smi -L` + `kangaroo -l`).
 
 ---
 
@@ -71,28 +71,27 @@ Observatory keeps the UI/DB/vault. The GPU box only has the CUDA binary (and `ss
 └─────────────────────┘                      └──────────────────────┘
 ```
 
-On the **observatory**, either use the UI:
+On the **observatory**, use the UI:
 
-1. **Settings → Kangaroo runner → Remote GPU (SSH)**
-2. Fill **SSH host** (`user@gpu-box`), remote binary, optional GPU id / extra args
-3. **Save & enable runner**
-4. **Test SSH + GPU** until the probe succeeds
-5. **Grinder → Start kangaroo** (or `npm run kangaroo -- --puzzle N`)
+1. **Settings → Kangaroo runners → + Remote GPU**
+2. Name it (e.g. `GPU · Tailscale 3090`), set **SSH host** `user@100.x.x.x`, remote binary
+3. **Save runner** and leave **Enabled** checked
+4. **Test** until the probe succeeds (passwordless SSH required)
+5. Optionally keep **CPU (this machine)** enabled to race both
+6. **Grinder → Start kangaroo** (checkboxes select a subset; default = all enabled)
 
-Or set env (same effect):
+Or inject one remote via env (added to the runner list at runtime):
 
 ```bash
-export KANGAROO_MODE=remote-gpu
-# or: KANGAROO_BACKEND=external + KANGAROO_SSH=…
-export KANGAROO_SSH='user@gpu-box'
+export KANGAROO_SSH='user@100.120.88.104'
 export KANGAROO_JLP_REMOTE_BIN='/opt/Kangaroo/kangaroo'
-# export KANGAROO_SSH_OPTS='-o BatchMode=yes -o ConnectTimeout=10'
-# export KANGAROO_WRAPPER=scripts/kangaroo-ssh-wrapper.sh
 ```
 
-The app auto-builds  
-`scripts/kangaroo-ssh-wrapper.sh {pubkey} {lo} {hi}`  
-and injects `KANGAROO_SSH` / remote bin into the child env.
+Each remote uses `scripts/kangaroo-ssh-wrapper.sh` with per-runner SSH/env injection.
+
+**Honest multi-runner note:** independent processes do not share distinguished-point tables.
+Racing N remotes raises aggregate ops/s but is not as efficient as one multi-GPU JLP job with a
+shared herd. Still useful for “laptop CPU + home 3090 + another box.”
 
 See [`scripts/kangaroo-ssh-wrapper.sh`](../scripts/kangaroo-ssh-wrapper.sh) — it:
 

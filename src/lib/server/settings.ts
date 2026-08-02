@@ -76,35 +76,24 @@ export interface AppSettings {
    */
   kangaroo: {
     /**
-     * UI mode — preferred over raw backend when set.
-     * cpu | local-gpu | remote-gpu | custom | '' (derive from backend/env).
+     * Multi-runner list (preferred). When empty, legacy single-slot fields below
+     * are migrated at read time by listKangarooRunners().
+     */
+    runners: KangarooRunnerConfig[];
+    /**
+     * @deprecated Single-slot fields — kept for migration / env parity.
+     * Prefer `runners`.
      */
     mode: KangarooMode | '';
-    /** cpu | jlp | external — '' = env or default cpu. */
     backend: KangarooBackend | '';
-    /** Path to JeanLucPons/Kangaroo (or compatible) CUDA binary (local-gpu). */
     jlpBin: string;
-    /** Extra CLI args for JLP (local or remote, e.g. "-d 18 -ws -w …"). */
     jlpExtraArgs: string;
-    /** Use -gpu (default true when backend is jlp). null = default true. */
     jlpUseGpu: boolean | null;
-    /** -gpuId list, e.g. "0" or "0,1". */
     jlpGpuId: string;
-    /**
-     * External command template (custom mode). Placeholders: {pubkey} {lo} {hi}
-     * {lo64} {hi64} {threads} {dp} {max_ops} {puzzle}.
-     */
     externalCmd: string;
-    /** Remote GPU: SSH target, e.g. user@gpu-box (KANGAROO_SSH). */
     sshHost: string;
-    /** Extra ssh(1) options, e.g. "-o BatchMode=yes -i ~/.ssh/gpu". */
     sshOpts: string;
-    /** Path to kangaroo binary *on the remote host*. */
     remoteBin: string;
-    /**
-     * Local wrapper script for remote-gpu mode.
-     * Default when empty: scripts/kangaroo-ssh-wrapper.sh
-     */
     wrapperPath: string;
   };
   /**
@@ -126,6 +115,23 @@ export type KangarooBackend = 'cpu' | 'jlp' | 'external';
 /** Operator-facing kangaroo runner mode (Settings UI). */
 export type KangarooMode = 'cpu' | 'local-gpu' | 'remote-gpu' | 'custom';
 
+/** One kangaroo solver endpoint (local CPU/CUDA or remote SSH GPU). */
+export type KangarooRunnerConfig = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  kind: KangarooMode;
+  jlpBin: string;
+  jlpExtraArgs: string;
+  jlpUseGpu: boolean | null;
+  jlpGpuId: string;
+  externalCmd: string;
+  sshHost: string;
+  sshOpts: string;
+  remoteBin: string;
+  wrapperPath: string;
+};
+
 /** Default local wrapper for remote-gpu mode. */
 export const DEFAULT_KANGAROO_SSH_WRAPPER = 'scripts/kangaroo-ssh-wrapper.sh';
 export const DEFAULT_KANGAROO_REMOTE_BIN = '/opt/Kangaroo/kangaroo';
@@ -141,6 +147,7 @@ const DEFAULTS: AppSettings = {
   grind: { pace: 'normal', maxWorkers: null, throttleMs: null },
   richlist: { minSats: null, scriptPolicy: '', loyceUrl: '' },
   kangaroo: {
+    runners: [],
     mode: '',
     backend: '',
     jlpBin: '',
@@ -187,6 +194,32 @@ export function kangarooBackendToMode(
   if (backend === 'jlp') return 'local-gpu';
   if (backend === 'external') return sshHost.trim() ? 'remote-gpu' : 'custom';
   return 'cpu';
+}
+
+function normalizeRunnerConfig(raw: unknown): KangarooRunnerConfig | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const kind =
+    normalizeKangarooMode(r.kind) ||
+    kangarooBackendToMode(normalizeKangarooBackend(r.backend), String(r.sshHost ?? ''));
+  if (!kind) return null;
+  const id = String(r.id ?? '').trim();
+  if (!id) return null;
+  return {
+    id,
+    name: String(r.name ?? id).trim() || id,
+    enabled: r.enabled === undefined ? true : Boolean(r.enabled),
+    kind,
+    jlpBin: String(r.jlpBin ?? '').trim(),
+    jlpExtraArgs: String(r.jlpExtraArgs ?? '').trim(),
+    jlpUseGpu: r.jlpUseGpu === null || r.jlpUseGpu === undefined ? null : Boolean(r.jlpUseGpu),
+    jlpGpuId: String(r.jlpGpuId ?? '').trim(),
+    externalCmd: String(r.externalCmd ?? '').trim(),
+    sshHost: String(r.sshHost ?? '').trim(),
+    sshOpts: String(r.sshOpts ?? '').trim(),
+    remoteBin: String(r.remoteBin ?? '').trim(),
+    wrapperPath: String(r.wrapperPath ?? '').trim()
+  };
 }
 
 /** Prefer live env so CLI/tests can override DATA_DIR without reloading config. */
@@ -263,6 +296,9 @@ function normalize(raw: Partial<AppSettings> | null | undefined): AppSettings {
       loyceUrl: String(rl.loyceUrl ?? '').trim()
     },
     kangaroo: {
+      runners: Array.isArray(kg.runners)
+        ? (kg.runners.map(normalizeRunnerConfig).filter(Boolean) as KangarooRunnerConfig[])
+        : [],
       mode: normalizeKangarooMode(kg.mode),
       backend: normalizeKangarooBackend(kg.backend),
       jlpBin: String(kg.jlpBin ?? '').trim(),

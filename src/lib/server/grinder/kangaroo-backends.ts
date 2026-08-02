@@ -15,6 +15,13 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { effectiveGrind, effectiveKangaroo, type KangarooBackend } from '../settings';
+import {
+  listKangarooRunners,
+  pickRunners,
+  runnerToDispatch,
+  type ResolvedKangarooRunner,
+  type RunnerDispatchConfig
+} from './kangaroo-runners';
 
 export type KangarooProgress = {
   ops: number;
@@ -39,6 +46,11 @@ export interface KangarooSolveOpts {
   onProgress?: (p: KangarooProgress) => void;
   /** Optional puzzle number for logging / templates. */
   puzzleN?: number;
+  /** Dispatch config; defaults to effectiveKangaroo() single-slot. */
+  config?: RunnerDispatchConfig;
+  /** Optional runner id for progress tagging. */
+  runnerId?: string;
+  runnerName?: string;
 }
 
 function strip0x(h: string): string {
@@ -77,57 +89,46 @@ export function kangarooAvailability(): {
   mode: string;
   available: boolean;
   detail: string;
-  /** Remote GPU host when mode is remote-gpu. */
   sshHost: string | null;
+  runners: ResolvedKangarooRunner[];
+  enabledCount: number;
+  availableCount: number;
 } {
-  const cfg = effectiveKangaroo();
-  if (cfg.mode === 'remote-gpu' || (cfg.backend === 'external' && cfg.sshHost)) {
-    const wrapper = cfg.wrapperPath;
-    const wrapperOk = !!wrapper && (existsSync(wrapper) || existsSync(join(process.cwd(), wrapper)));
-    const hostOk = !!cfg.sshHost.trim();
-    const cmd = cfg.externalCmd.trim();
-    const available = hostOk && wrapperOk && !!cmd;
-    let detail: string;
-    if (!hostOk) detail = 'remote-gpu · set SSH host (user@gpu-box)';
-    else if (!wrapperOk) detail = `remote-gpu · wrapper missing: ${wrapper}`;
-    else detail = `remote-gpu · ${cfg.sshHost} · ${cfg.remoteBin}`;
+  const runners = listKangarooRunners();
+  const enabled = runners.filter((r) => r.enabled);
+  const ready = enabled.filter((r) => r.available);
+  const anyReady = runners.filter((r) => r.available);
+
+  // Summary from primary ready runner (or first enabled / first overall).
+  const primary = ready[0] ?? enabled[0] ?? runners[0] ?? null;
+  if (!primary) {
     return {
-      backend: 'external',
-      mode: 'remote-gpu',
-      available,
-      detail,
-      sshHost: cfg.sshHost || null
+      backend: 'cpu',
+      mode: 'cpu',
+      available: false,
+      detail: 'no runners configured',
+      sshHost: null,
+      runners,
+      enabledCount: 0,
+      availableCount: 0
     };
   }
-  if (cfg.backend === 'jlp') {
-    const jlp = cfg.jlpBin && existsSync(cfg.jlpBin) ? cfg.jlpBin : null;
-    return {
-      backend: 'jlp',
-      mode: 'local-gpu',
-      available: !!jlp,
-      detail: jlp
-        ? `local-gpu · ${jlp}${cfg.jlpExtraArgs ? ' ' + cfg.jlpExtraArgs : ''}`
-        : 'local-gpu · set JLP binary path (KANGAROO_JLP_BIN)',
-      sshHost: null
-    };
-  }
-  if (cfg.backend === 'external') {
-    const cmd = cfg.externalCmd.trim();
-    return {
-      backend: 'external',
-      mode: 'custom',
-      available: !!cmd,
-      detail: cmd ? `custom · ${cmd}` : 'custom · external command empty',
-      sshHost: null
-    };
-  }
-  const cpu = resolveCpuBinary();
+
+  const remotes = ready.filter((r) => r.kind === 'remote-gpu').map((r) => r.sshHost);
+  const detail =
+    ready.length > 1
+      ? `${ready.length} runners ready · ${ready.map((r) => r.name).join(', ')}`
+      : primary.detail;
+
   return {
-    backend: 'cpu',
-    mode: 'cpu',
-    available: !!cpu,
-    detail: cpu ? `cpu · ${cpu}` : 'cpu · satoshi-kangaroo not built (npm run grind:build)',
-    sshHost: null
+    backend: primary.backend,
+    mode: primary.kind,
+    available: ready.length > 0 || anyReady.length > 0,
+    detail,
+    sshHost: remotes[0] ?? (primary.sshHost || null),
+    runners,
+    enabledCount: enabled.length,
+    availableCount: ready.length
   };
 }
 
@@ -359,7 +360,7 @@ export function splitCommand(cmd: string): string[] {
 }
 
 function runExternal(opts: KangarooSolveOpts): Run {
-  const cfg = effectiveKangaroo();
+  const cfg = opts.config ?? effectiveKangaroo();
   const tmpl = cfg.externalCmd.trim();
   if (!tmpl) {
     return failedRun(
@@ -453,7 +454,7 @@ export function parseJlpPriv(line: string): string | null {
 }
 
 function runJlp(opts: KangarooSolveOpts): Run {
-  const cfg = effectiveKangaroo();
+  const cfg = opts.config ?? effectiveKangaroo();
   const bin = cfg.jlpBin;
   if (!bin || !existsSync(bin)) {
     return failedRun('JLP backend: set KANGAROO_JLP_BIN to your Kangaroo binary (CUDA build)');
@@ -588,8 +589,129 @@ function runJlp(opts: KangarooSolveOpts): Run {
 /* ---- Public entry ------------------------------------------------------ */
 
 export function runKangaroo(opts: KangarooSolveOpts): Run {
-  const cfg = effectiveKangaroo();
-  if (cfg.backend === 'jlp') return runJlp(opts);
-  if (cfg.backend === 'external') return runExternal(opts);
+  const cfg = opts.config ?? effectiveKangaroo();
+  if (cfg.backend === 'jlp') return runJlp({ ...opts, config: cfg });
+  if (cfg.backend === 'external') return runExternal({ ...opts, config: cfg });
   return runCpu(opts);
+}
+
+/** Run on a resolved multi-runner definition. */
+export function runKangarooOnRunner(runner: ResolvedKangarooRunner, opts: KangarooSolveOpts): Run {
+  return runKangaroo({
+    ...opts,
+    runnerId: runner.id,
+    runnerName: runner.name,
+    config: runnerToDispatch(runner)
+  });
+}
+
+export type MultiKangarooProgress = KangarooProgress & {
+  runnerId: string;
+  runnerName: string;
+};
+
+/**
+ * Race several runners on the same range. First `found` wins; others are cancelled.
+ * Progress is tagged per runner; aggregate ops/s is the sum of live rates.
+ */
+export function runKangarooMulti(
+  runnerIds: string[] | null | undefined,
+  opts: Omit<KangarooSolveOpts, 'config' | 'runnerId' | 'runnerName'> & {
+    onRunnerProgress?: (p: MultiKangarooProgress) => void;
+  }
+): Run {
+  const runners = pickRunners(runnerIds).filter((r) => r.available);
+  if (!runners.length) {
+    return failedRun('no available kangaroo runners — enable one in Settings');
+  }
+  if (runners.length === 1) {
+    const r = runners[0];
+    return runKangarooOnRunner(r, {
+      ...opts,
+      onProgress: (p) => {
+        opts.onProgress?.(p);
+        opts.onRunnerProgress?.({ ...p, runnerId: r.id, runnerName: r.name });
+      }
+    });
+  }
+  return runKangarooMultiImpl(runners, opts);
+}
+
+function runKangarooMultiImpl(
+  runners: ResolvedKangarooRunner[],
+  opts: Omit<KangarooSolveOpts, 'config' | 'runnerId' | 'runnerName'> & {
+    onRunnerProgress?: (p: MultiKangarooProgress) => void;
+  }
+): Run {
+  const cancels: Array<() => void> = [];
+  let settled = false;
+  const rates = new Map<string, number>();
+  const opsMap = new Map<string, number>();
+  let pending = runners.length;
+  let lastNonFound: KangarooRunResult = { status: 'exhausted', ops: 0, elapsedMs: 0 };
+
+  const promise = new Promise<KangarooRunResult>((resolve) => {
+    const finish = (res: KangarooRunResult) => {
+      if (settled) return;
+      settled = true;
+      for (const c of cancels) {
+        try {
+          c();
+        } catch {
+          /* ignore */
+        }
+      }
+      resolve(res);
+    };
+
+    for (const r of runners) {
+      const { promise: p, cancel } = runKangarooOnRunner(r, {
+        ...opts,
+        onProgress: (prog) => {
+          rates.set(r.id, prog.opsPerSec);
+          opsMap.set(r.id, prog.ops);
+          let sumRate = 0;
+          let sumOps = 0;
+          for (const v of rates.values()) sumRate += v;
+          for (const v of opsMap.values()) sumOps += v;
+          opts.onProgress?.({
+            ops: sumOps,
+            dps: prog.dps,
+            opsPerSec: sumRate,
+            elapsedMs: prog.elapsedMs
+          });
+          opts.onRunnerProgress?.({ ...prog, runnerId: r.id, runnerName: r.name });
+        }
+      });
+      cancels.push(cancel);
+      p.then((res) => {
+        if (settled) return;
+        if (res.status === 'found') {
+          finish(res);
+          return;
+        }
+        lastNonFound = res;
+        pending--;
+        if (pending <= 0) finish(lastNonFound);
+      }).catch((err) => {
+        if (settled) return;
+        lastNonFound = { status: 'error', message: String(err) };
+        pending--;
+        if (pending <= 0) finish(lastNonFound);
+      });
+    }
+  });
+
+  return {
+    promise,
+    cancel: () => {
+      for (const c of cancels) {
+        try {
+          c();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  };
 }

@@ -51,71 +51,81 @@ test('settings save/load/password-keep/clear round-trip in DATA_DIR', async () =
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('kangaroo remote-gpu mode resolves wrapper cmd and SSH fields', async () => {
+test('multi kangaroo runners list + remote resolve', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ss-kang-'));
   const prev = process.env.DATA_DIR;
   const prevEnv: Record<string, string | undefined> = {
-    KANGAROO_MODE: process.env.KANGAROO_MODE,
-    KANGAROO_BACKEND: process.env.KANGAROO_BACKEND,
-    KANGAROO_SSH: process.env.KANGAROO_SSH,
-    KANGAROO_EXTERNAL_CMD: process.env.KANGAROO_EXTERNAL_CMD
+    KANGAROO_SSH: process.env.KANGAROO_SSH
   };
   process.env.DATA_DIR = dir;
-  delete process.env.KANGAROO_MODE;
-  delete process.env.KANGAROO_BACKEND;
   delete process.env.KANGAROO_SSH;
-  delete process.env.KANGAROO_EXTERNAL_CMD;
   try {
-    const {
-      updateSettings,
-      effectiveKangaroo,
-      kangarooModeToBackend,
-      DEFAULT_KANGAROO_SSH_WRAPPER
-    } = await import('../src/lib/server/settings.ts');
+    const { updateSettings, DEFAULT_KANGAROO_SSH_WRAPPER } = await import(
+      '../src/lib/server/settings.ts'
+    );
+    const { listKangarooRunners, pickRunners } = await import(
+      '../src/lib/server/grinder/kangaroo-runners.ts'
+    );
 
     updateSettings({
       kangaroo: {
-        mode: 'remote-gpu',
-        backend: kangarooModeToBackend('remote-gpu'),
-        sshHost: 'gpu@3090.local',
-        remoteBin: '/opt/Kangaroo/kangaroo',
-        wrapperPath: '',
-        externalCmd: '',
-        jlpBin: '',
-        jlpExtraArgs: '-d 16',
-        jlpGpuId: '0',
-        jlpUseGpu: true,
-        sshOpts: '-o BatchMode=yes'
-      }
-    });
-    const k = effectiveKangaroo();
-    assert.equal(k.mode, 'remote-gpu');
-    assert.equal(k.backend, 'external');
-    assert.equal(k.sshHost, 'gpu@3090.local');
-    assert.equal(k.remoteBin, '/opt/Kangaroo/kangaroo');
-    assert.equal(k.wrapperPath, DEFAULT_KANGAROO_SSH_WRAPPER);
-    assert.equal(k.externalCmd, `${DEFAULT_KANGAROO_SSH_WRAPPER} {pubkey} {lo} {hi}`);
-    assert.equal(k.jlpExtraArgs, '-d 16');
-
-    updateSettings({
-      kangaroo: {
-        mode: 'cpu',
-        backend: 'cpu',
-        sshHost: 'gpu@3090.local', // keep host when switching away
-        remoteBin: '/opt/Kangaroo/kangaroo',
-        wrapperPath: '',
-        externalCmd: '',
+        runners: [
+          {
+            id: 'cpu-local',
+            name: 'CPU',
+            enabled: true,
+            kind: 'cpu',
+            jlpBin: '',
+            jlpExtraArgs: '',
+            jlpUseGpu: null,
+            jlpGpuId: '',
+            externalCmd: '',
+            sshHost: '',
+            sshOpts: '',
+            remoteBin: '',
+            wrapperPath: ''
+          },
+          {
+            id: 'gpu1',
+            name: 'GPU remote',
+            enabled: true,
+            kind: 'remote-gpu',
+            jlpBin: '',
+            jlpExtraArgs: '-d 16',
+            jlpUseGpu: true,
+            jlpGpuId: '0',
+            externalCmd: '',
+            sshHost: 'gpu@3090.local',
+            sshOpts: '-o BatchMode=yes',
+            remoteBin: '/opt/Kangaroo/kangaroo',
+            wrapperPath: ''
+          }
+        ],
+        mode: '',
+        backend: '',
         jlpBin: '',
         jlpExtraArgs: '',
-        jlpGpuId: '',
         jlpUseGpu: null,
-        sshOpts: ''
+        jlpGpuId: '',
+        externalCmd: '',
+        sshHost: '',
+        sshOpts: '',
+        remoteBin: '',
+        wrapperPath: ''
       }
     });
-    const k2 = effectiveKangaroo();
-    assert.equal(k2.mode, 'cpu');
-    assert.equal(k2.backend, 'cpu');
-    assert.equal(k2.sshHost, 'gpu@3090.local');
+
+    const all = listKangarooRunners();
+    assert.equal(all.length, 2);
+    const remote = all.find((r) => r.id === 'gpu1')!;
+    assert.equal(remote.kind, 'remote-gpu');
+    assert.equal(remote.sshHost, 'gpu@3090.local');
+    assert.equal(remote.wrapperPathResolved, DEFAULT_KANGAROO_SSH_WRAPPER);
+    assert.equal(remote.externalCmdResolved, `${DEFAULT_KANGAROO_SSH_WRAPPER} {pubkey} {lo} {hi}`);
+    assert.ok(remote.available); // wrapper exists in repo
+
+    const picked = pickRunners(null);
+    assert.ok(picked.some((r) => r.id === 'gpu1'));
   } finally {
     for (const [k, v] of Object.entries(prevEnv)) {
       if (v === undefined) delete process.env[k];

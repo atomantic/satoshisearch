@@ -64,9 +64,13 @@ export const actions: Actions = {
     const data = await request.formData();
     const n = Number(data.get('puzzle') ?? 0);
     if (!Number.isFinite(n) || n < 1) return fail(400, { error: 'invalid puzzle number' });
+    const runnerIds = data
+      .getAll('runners')
+      .map((v) => String(v).trim())
+      .filter(Boolean);
     try {
-      await kangaroo.start(n);
-      return { kangarooStarted: n };
+      await kangaroo.start(n, runnerIds.length ? runnerIds : undefined);
+      return { kangarooStarted: n, runners: runnerIds };
     } catch (e) {
       return fail(400, { error: String(e) });
     }

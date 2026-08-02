@@ -161,44 +161,44 @@
 <div class="card kang-card" class:live={kg.running}>
   <div class="k">Pollard's kangaroo · exposed puzzles</div>
   <p class="faint small kang-blurb">
-    Interval ECDLP (~2<sup>n/2</sup> ops) for pubkey-known puzzles — not sequential grind.
-    Backends: <span class="mono">cpu</span> (satoshi-kangaroo),
-    <span class="mono">jlp</span> (JeanLucPons CUDA on your 3090),
-    <span class="mono">external</span> (any JSONL solver). Configure via env or
-    <a href="/settings">Settings</a>. #140 is still ~2<sup>69.5</sup> work.
+    Interval ECDLP for pubkey-known puzzles. Race <b>multiple runners</b> (local CPU + remote
+    GPUs): first find wins, others cancel. Configure in
+    <a href="/settings">Settings → Kangaroo runners</a>.
   </p>
   <p class="faint small mono">
-    mode: {kg.mode ?? kg.backend}
-    {#if kg.sshHost}
-      · {kg.sshHost}
-    {/if}
-    {#if kg.backendDetail}
-      · {kg.backendDetail}
-    {/if}
+    {kg.backendDetail}
   </p>
+  {#if kg.runners?.length}
+    <ul class="runner-list">
+      {#each kg.runners as r}
+        <li class:off={!r.enabled} class:live={r.status === 'running'}>
+          <span class="dot" class:ok={r.available && r.enabled} class:warn={!r.available}></span>
+          <b>{r.name}</b>
+          <span class="faint mono"> · {r.kind}{r.sshHost ? ` · ${r.sshHost}` : ''}</span>
+          {#if kg.running && kg.activeRunnerIds?.includes(r.id)}
+            <span class="mono"> · {Math.round(r.opsPerSec).toLocaleString()}/s · {r.status}</span>
+          {:else if !r.available}
+            <span class="warn"> · not ready</span>
+          {:else if !r.enabled}
+            <span class="faint"> · disabled</span>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
   {#if !kg.available}
     <p class="warn small">
-      {#if kg.mode === 'remote-gpu' || (kg.backend === 'external' && kg.sshHost)}
-        Remote GPU not ready — configure SSH host + wrapper in
-        <a href="/settings">Settings → Kangaroo runner</a>.
-      {:else if kg.mode === 'local-gpu' || kg.backend === 'jlp'}
-        Set the local CUDA binary in <a href="/settings">Settings</a>
-        (or <span class="mono">KANGAROO_JLP_BIN</span>).
-      {:else if kg.mode === 'custom' || kg.backend === 'external'}
-        Set a custom command in <a href="/settings">Settings</a>.
-      {:else}
-        Binary missing — run <span class="mono">npm run grind:build</span>
-        or enable a remote GPU in <a href="/settings">Settings</a>.
-      {/if}
+      No ready runners — add/enable CPU or remote GPU in
+      <a href="/settings">Settings → Kangaroo runners</a>.
     </p>
   {:else if kg.running}
     <div class="v">
-      <span class="pulse"></span>Running · puzzle #{kg.puzzleN} · {kg.mode ?? kg.backend}
-      {#if kg.sshHost}<span class="faint"> · {kg.sshHost}</span>{/if}
+      <span class="pulse"></span>Running · puzzle #{kg.puzzleN}
+      <span class="faint"> · {kg.activeRunnerIds?.length ?? 0} runner(s)</span>
     </div>
     <div class="metrics">
-      <div><span class="faint">ops/sec</span><b class="num">{kg.opsPerSec.toLocaleString()}</b></div>
-      <div><span class="faint">ops</span><b class="num">{bigCount(kg.ops)}</b></div>
+      <div><span class="faint">ops/sec (Σ)</span><b class="num">{kg.opsPerSec.toLocaleString()}</b></div>
+      <div><span class="faint">ops (Σ)</span><b class="num">{bigCount(kg.ops)}</b></div>
       <div><span class="faint">DPs</span><b class="num">{bigCount(kg.dps)}</b></div>
       <div><span class="faint">~work</span><b class="num">2<sup>{kg.halfBits}</sup></b></div>
       <div><span class="faint">hits</span><b class="num" class:btc={kg.hits > 0}>{kg.hits}</b></div>
@@ -224,6 +224,24 @@
             {/each}
           </select>
         </label>
+        {#if kg.runners?.length}
+          <fieldset class="runner-pick">
+            <legend class="faint">Runners (default = all enabled)</legend>
+            {#each kg.runners as r}
+              <label class="runner-check" class:off={!r.available}>
+                <input
+                  type="checkbox"
+                  name="runners"
+                  value={r.id}
+                  checked={r.enabled && r.available}
+                  disabled={!r.available}
+                />
+                {r.name}
+                <span class="faint mono">({r.kind}{r.sshHost ? ` · ${r.sshHost}` : ''})</span>
+              </label>
+            {/each}
+          </fieldset>
+        {/if}
         <button class="btn-accent" disabled={!kg.available}>Start kangaroo</button>
       </form>
     {/if}
@@ -292,6 +310,53 @@
   .kang-blurb {
     max-width: 780px;
     margin: 6px 0 12px;
+  }
+  .runner-list {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+    font-size: 13px;
+  }
+  .runner-list li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 3px 0;
+  }
+  .runner-list li.off {
+    opacity: 0.5;
+  }
+  .runner-list .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .runner-list .dot.ok {
+    background: var(--success);
+  }
+  .runner-list .dot.warn {
+    background: #f0c674;
+  }
+  .runner-pick {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 10px 0;
+  }
+  .runner-pick legend {
+    padding: 0 4px;
+    font-size: 12px;
+  }
+  .runner-check {
+    display: block;
+    font-size: 13px;
+    margin: 4px 0;
+  }
+  .runner-check.off {
+    opacity: 0.5;
   }
   .err {
     background: rgba(255, 87, 87, 0.1);

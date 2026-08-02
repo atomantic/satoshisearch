@@ -20,15 +20,20 @@ import {
   effectiveRichlist,
   effectiveGrind,
   effectiveKangaroo,
-  normalizeKangarooBackend,
   normalizeKangarooMode,
-  kangarooModeToBackend,
   DEFAULT_KANGAROO_SSH_WRAPPER,
   DEFAULT_KANGAROO_REMOTE_BIN,
   vaultKeyStatusView,
-  generateVaultKey
+  generateVaultKey,
+  type KangarooRunnerConfig
 } from '$server/settings';
 import { kangarooAvailability } from '$server/grinder/kangaroo-backends';
+import {
+  listKangarooRunners,
+  emptyRunner,
+  newRunnerId,
+  migrateLegacyKangaroo
+} from '$server/grinder/kangaroo-runners';
 import { spawnSync } from 'node:child_process';
 import { getBlockchainInfo, isRpcConfigured, resolveRpcAuth } from '$server/bitcoin/rpc';
 import { audit } from '$server/rescue/audit';
@@ -105,18 +110,12 @@ export const load: PageServerLoad = async () => {
     kangaroo: {
       mode: kangaroo.mode,
       backend: kangaroo.backend,
-      jlpBin: kangaroo.jlpBin,
-      jlpExtraArgs: kangaroo.jlpExtraArgs,
-      jlpUseGpu: kangaroo.jlpUseGpu,
-      jlpGpuId: kangaroo.jlpGpuId,
-      externalCmd: kangaroo.externalCmd,
-      sshHost: kangaroo.sshHost,
-      sshOpts: kangaroo.sshOpts,
-      remoteBin: kangaroo.remoteBin,
-      wrapperPath: kangaroo.wrapperPath,
       source: kangaroo.source,
       available: kangarooAvail.available,
       detail: kangarooAvail.detail,
+      runners: listKangarooRunners(),
+      enabledCount: kangarooAvail.enabledCount,
+      availableCount: kangarooAvail.availableCount,
       defaults: {
         wrapperPath: DEFAULT_KANGAROO_SSH_WRAPPER,
         remoteBin: DEFAULT_KANGAROO_REMOTE_BIN
@@ -328,19 +327,12 @@ export const actions: Actions = {
     };
   },
 
-  saveKangaroo: async ({ request }) => {
+  saveKangarooRunner: async ({ request }) => {
     const data = await request.formData();
-    const modeRaw = String(data.get('mode') ?? data.get('backend') ?? '').trim();
-    // Accept legacy backend values (cpu|jlp|external) and new mode values.
-    let mode = normalizeKangarooMode(modeRaw);
-    if (!mode) {
-      const legacy = normalizeKangarooBackend(modeRaw);
-      if (legacy === 'jlp') mode = 'local-gpu';
-      else if (legacy === 'external') mode = 'custom';
-      else if (legacy === 'cpu') mode = 'cpu';
-    }
-    if (!mode) mode = 'cpu';
-
+    const id = String(data.get('id') ?? '').trim() || newRunnerId();
+    const kind = normalizeKangarooMode(String(data.get('kind') ?? 'cpu').trim()) || 'cpu';
+    const name = String(data.get('name') ?? '').trim() || id;
+    const enabled = data.get('enabled') === 'on';
     const jlpBin = String(data.get('jlpBin') ?? '').trim();
     const jlpExtraArgs = String(data.get('jlpExtraArgs') ?? '').trim();
     const jlpGpuId = String(data.get('jlpGpuId') ?? '').trim();
@@ -351,62 +343,82 @@ export const actions: Actions = {
     const remoteBin = String(data.get('remoteBin') ?? '').trim();
     const wrapperPath = String(data.get('wrapperPath') ?? '').trim();
 
-    if (mode === 'remote-gpu' && !sshHost) {
-      return fail(400, { error: 'Remote GPU requires an SSH host (user@gpu-box).' });
+    if (kind === 'remote-gpu' && !sshHost) {
+      return fail(400, { error: 'Remote GPU requires an SSH host (user@host).' });
     }
-    if (mode === 'local-gpu' && !jlpBin) {
-      return fail(400, { error: 'Local GPU requires a path to the JeanLucPons (or compatible) binary.' });
+    if (kind === 'local-gpu' && !jlpBin) {
+      return fail(400, { error: 'Local CUDA requires a binary path.' });
     }
-    if (mode === 'custom' && !externalCmd) {
-      return fail(400, { error: 'Custom mode requires an external command template.' });
+    if (kind === 'custom' && !externalCmd) {
+      return fail(400, { error: 'Custom runner requires a command template.' });
     }
 
-    const backend = kangarooModeToBackend(mode);
-    // remote-gpu: store empty externalCmd so effectiveKangaroo auto-builds the wrapper.
-    const storedExternal =
-      mode === 'remote-gpu' ? '' : mode === 'custom' ? externalCmd : externalCmd;
-
-    updateSettings({
-      kangaroo: {
-        mode,
-        backend,
-        jlpBin,
-        jlpExtraArgs,
-        jlpGpuId,
-        jlpUseGpu,
-        externalCmd: storedExternal,
-        sshHost,
-        sshOpts,
-        remoteBin,
-        wrapperPath
-      }
-    });
-    audit('settings-kangaroo-saved', {
-      mode,
-      backend,
-      jlpBin: jlpBin || null,
+    const runner: KangarooRunnerConfig = emptyRunner({
+      id,
+      name,
+      kind,
+      enabled,
+      jlpBin,
+      jlpExtraArgs,
+      jlpGpuId,
       jlpUseGpu,
-      jlpGpuId: jlpGpuId || null,
-      sshHost: sshHost || null,
-      remoteBin: remoteBin || null,
-      externalCmd: storedExternal ? '[set]' : null
+      externalCmd: kind === 'remote-gpu' ? '' : externalCmd,
+      sshHost,
+      sshOpts,
+      remoteBin,
+      wrapperPath
     });
-    return {
-      done: `Saved kangaroo runner: ${mode}${sshHost ? ` · ${sshHost}` : ''}. Takes effect on the next kangaroo start.`
-    };
+
+    const cur = loadSettings();
+    let runners = migrateLegacyKangaroo(cur.kangaroo);
+    const idx = runners.findIndex((r) => r.id === id);
+    if (idx >= 0) runners[idx] = runner;
+    else runners.push(runner);
+
+    updateSettings({ kangaroo: { ...cur.kangaroo, runners } });
+    audit('settings-kangaroo-runner-saved', {
+      id: runner.id,
+      name: runner.name,
+      kind: runner.kind,
+      enabled: runner.enabled,
+      sshHost: runner.sshHost || null
+    });
+    return { done: `Saved runner “${runner.name}” (${runner.kind}${runner.enabled ? ', enabled' : ', disabled'}).` };
+  },
+
+  deleteKangarooRunner: async ({ request }) => {
+    const data = await request.formData();
+    const id = String(data.get('id') ?? '').trim();
+    if (!id) return fail(400, { error: 'missing runner id' });
+    const cur = loadSettings();
+    let runners = migrateLegacyKangaroo(cur.kangaroo).filter((r) => r.id !== id);
+    if (!runners.length) {
+      runners = [emptyRunner({ id: 'cpu-local', name: 'CPU (this machine)', kind: 'cpu', enabled: true })];
+    }
+    updateSettings({ kangaroo: { ...cur.kangaroo, runners } });
+    audit('settings-kangaroo-runner-deleted', { id });
+    return { done: `Removed runner ${id}.` };
+  },
+
+  toggleKangarooRunner: async ({ request }) => {
+    const data = await request.formData();
+    const id = String(data.get('id') ?? '').trim();
+    const enabled = data.get('enabled') === 'on' || data.get('enabled') === 'true';
+    if (!id) return fail(400, { error: 'missing runner id' });
+    const cur = loadSettings();
+    const runners = migrateLegacyKangaroo(cur.kangaroo).map((r) =>
+      r.id === id ? { ...r, enabled } : r
+    );
+    updateSettings({ kangaroo: { ...cur.kangaroo, runners } });
+    return { done: `${enabled ? 'Enabled' : 'Disabled'} runner ${id}.` };
   },
 
   testKangarooRemote: async ({ request }) => {
     const data = await request.formData();
-    // Prefer form fields (unsaved) so operators can test before save.
-    const sshHost =
-      String(data.get('sshHost') ?? '').trim() || effectiveKangaroo().sshHost;
-    const sshOpts =
-      String(data.get('sshOpts') ?? '').trim() || effectiveKangaroo().sshOpts;
+    const sshHost = String(data.get('sshHost') ?? '').trim();
+    const sshOpts = String(data.get('sshOpts') ?? '').trim();
     const remoteBin =
-      String(data.get('remoteBin') ?? '').trim() ||
-      effectiveKangaroo().remoteBin ||
-      DEFAULT_KANGAROO_REMOTE_BIN;
+      String(data.get('remoteBin') ?? '').trim() || DEFAULT_KANGAROO_REMOTE_BIN;
 
     if (!sshHost) {
       return fail(400, { error: 'SSH host is empty — set user@gpu-box first.' });
@@ -418,7 +430,11 @@ export const actions: Actions = {
 
     const probe = spawnSync(
       'ssh',
-      [...opts, sshHost, `nvidia-smi -L 2>/dev/null; command -v '${remoteBin}' && '${remoteBin}' -l 2>/dev/null | head -20; echo __SS_OK__`],
+      [
+        ...opts,
+        sshHost,
+        `nvidia-smi -L 2>/dev/null; command -v '${remoteBin}' && '${remoteBin}' -l 2>/dev/null | head -20; echo __SS_OK__`
+      ],
       { encoding: 'utf8', timeout: 20_000 }
     );
 

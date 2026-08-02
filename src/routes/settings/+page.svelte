@@ -23,6 +23,33 @@
       };
     };
 
+  /**
+   * Remote-GPU probe. The SSH round-trip can take up to 20s, so this reports
+   * in place next to the row's button — a result rendered only in the page-top
+   * toast reads as "nothing happened" from this far down the page.
+   */
+  let kangTestResult: { id: string; ok: boolean; text: string } | null = null;
+  const testKey = (id: string) => `test-kang-${id}`;
+
+  const testRunner =
+    (id: string): SubmitFunction =>
+    () => {
+      busy = testKey(id);
+      kangTestResult = null;
+      return async ({ result }) => {
+        busy = '';
+        if (result.type === 'success') {
+          kangTestResult = { id, ok: true, text: String(result.data?.done ?? 'Probe OK.') };
+        } else if (result.type === 'failure') {
+          kangTestResult = { id, ok: false, text: String(result.data?.error ?? 'Probe failed.') };
+        } else if (result.type === 'error') {
+          kangTestResult = { id, ok: false, text: result.error?.message ?? 'Request failed.' };
+        }
+        // Deliberately no update() — the inline row is the report, and a
+        // reload would only replace the fresh probe with load-time status.
+      };
+    };
+
   const SCRIPT_TYPES = data.scriptTypes;
 
   // Form-bound so test uses current field values
@@ -54,24 +81,55 @@
   let grindThrottleMs =
     data.grind.stored.throttleMs != null ? String(data.grind.stored.throttleMs) : '';
 
-  // Kangaroo runner (cpu / local GPU / remote GPU / custom)
-  let kangMode =
-    data.kangaroo.stored.mode ||
-    data.kangaroo.mode ||
-    'cpu';
-  let kangJlpBin = data.kangaroo.stored.jlpBin || data.kangaroo.jlpBin || '';
-  let kangJlpExtra = data.kangaroo.stored.jlpExtraArgs || data.kangaroo.jlpExtraArgs || '';
-  let kangJlpGpuId = data.kangaroo.stored.jlpGpuId || data.kangaroo.jlpGpuId || '';
-  let kangJlpUseGpu = data.kangaroo.stored.jlpUseGpu ?? data.kangaroo.jlpUseGpu;
-  let kangExternal = data.kangaroo.stored.externalCmd || data.kangaroo.externalCmd || '';
-  let kangSshHost = data.kangaroo.stored.sshHost || data.kangaroo.sshHost || '';
-  let kangSshOpts = data.kangaroo.stored.sshOpts || data.kangaroo.sshOpts || '';
-  let kangRemoteBin =
-    data.kangaroo.stored.remoteBin || data.kangaroo.remoteBin || data.kangaroo.defaults.remoteBin;
-  let kangWrapper =
-    data.kangaroo.stored.wrapperPath ||
-    data.kangaroo.wrapperPath ||
-    data.kangaroo.defaults.wrapperPath;
+  // Kangaroo multi-runner editor
+  let editId = '';
+  let editName = '';
+  let editKind: 'cpu' | 'local-gpu' | 'remote-gpu' | 'custom' = 'remote-gpu';
+  let editEnabled = true;
+  let editJlpBin = '';
+  let editJlpExtra = '';
+  let editJlpGpuId = '0';
+  let editJlpUseGpu = true;
+  let editExternal = '';
+  let editSshHost = '';
+  let editSshOpts = '';
+  let editRemoteBin = data.kangaroo.defaults.remoteBin;
+  let editWrapper = data.kangaroo.defaults.wrapperPath;
+  let showEditor = false;
+
+  function startAdd(kind: typeof editKind = 'remote-gpu') {
+    editId = '';
+    editName = kind === 'remote-gpu' ? 'GPU remote' : kind === 'cpu' ? 'CPU (this machine)' : kind === 'local-gpu' ? 'Local CUDA' : 'Custom';
+    editKind = kind;
+    editEnabled = true;
+    editJlpBin = '';
+    editJlpExtra = '';
+    editJlpGpuId = '0';
+    editJlpUseGpu = true;
+    editExternal = '';
+    editSshHost = '';
+    editSshOpts = '-o BatchMode=yes';
+    editRemoteBin = data.kangaroo.defaults.remoteBin;
+    editWrapper = data.kangaroo.defaults.wrapperPath;
+    showEditor = true;
+  }
+
+  function startEdit(r: (typeof data.kangaroo.runners)[0]) {
+    editId = r.id;
+    editName = r.name;
+    editKind = r.kind as typeof editKind;
+    editEnabled = r.enabled;
+    editJlpBin = r.jlpBin;
+    editJlpExtra = r.jlpExtraArgs;
+    editJlpGpuId = r.jlpGpuId || '0';
+    editJlpUseGpu = r.jlpUseGpuResolved;
+    editExternal = r.externalCmd;
+    editSshHost = r.sshHost;
+    editSshOpts = r.sshOpts;
+    editRemoteBin = r.remoteBin || data.kangaroo.defaults.remoteBin;
+    editWrapper = r.wrapperPath || data.kangaroo.defaults.wrapperPath;
+    showEditor = true;
+  }
 </script>
 
 <svelte:head><title>Settings · satoshisearch</title></svelte:head>
@@ -490,185 +548,182 @@
 </div>
 
 <div class="card">
-  <div class="k">Kangaroo runner (CPU / GPU / remote)</div>
+  <div class="k">Kangaroo runners (CPU + multi GPU)</div>
   <p class="faint small top-note">
-    Exposed-puzzle ECDLP. Source: <b>{data.kangaroo.source}</b> · mode:
-    <b class="mono">{data.kangaroo.mode}</b>
-    {#if data.kangaroo.available}
-      · <span class="ok-text">ready</span>
-    {:else}
-      · <span class="warn">not ready</span>
-    {/if}
-    · {data.kangaroo.detail}
+    Race one or more solvers on the same puzzle (first find wins).
+    Source: <b>{data.kangaroo.source}</b> ·
+    {data.kangaroo.availableCount}/{data.kangaroo.runners.length} ready ·
+    {data.kangaroo.enabledCount} enabled ·
+    {#if data.kangaroo.available}<span class="ok-text">ready</span>{:else}<span class="warn">not ready</span>{/if}
   </p>
-  <form method="POST" action="?/saveKangaroo" class="rpc-form" use:enhance={track('save-kangaroo')}>
-    <fieldset class="pace-set">
-      <legend>Where to run kangaroo</legend>
-      <label class="pace-item">
-        <input type="radio" name="mode" value="cpu" bind:group={kangMode} />
-        <span>
-          <b>CPU (this machine)</b>
-          <em class="faint">— satoshi-kangaroo · default · laptop-friendly.</em>
-        </span>
-      </label>
-      <label class="pace-item">
-        <input type="radio" name="mode" value="local-gpu" bind:group={kangMode} />
-        <span>
-          <b>Local CUDA</b>
-          <em class="faint">— JeanLucPons (or compatible) on <em>this</em> host.</em>
-        </span>
-      </label>
-      <label class="pace-item">
-        <input type="radio" name="mode" value="remote-gpu" bind:group={kangMode} />
-        <span>
-          <b>Remote GPU (SSH)</b>
-          <em class="faint">— observatory here, kangaroo on your RTX box. Recommended split.</em>
-        </span>
-      </label>
-      <label class="pace-item">
-        <input type="radio" name="mode" value="custom" bind:group={kangMode} />
-        <span>
-          <b>Custom command</b>
-          <em class="faint">— any JSONL solver (RCKangaroo wrapper, pool client, …).</em>
-        </span>
-      </label>
-    </fieldset>
 
-    {#if kangMode === 'local-gpu'}
-      <div class="rpc-grid kang-panel">
-        <label class="full">
-          <span>JLP binary on this machine <em class="faint">(KANGAROO_JLP_BIN)</em></span>
-          <input name="jlpBin" type="text" class="mono" placeholder="/opt/Kangaroo/kangaroo" bind:value={kangJlpBin} />
-        </label>
-        <label>
-          <span>GPU id(s)</span>
-          <input name="jlpGpuId" type="text" class="mono" placeholder="0" bind:value={kangJlpGpuId} />
-        </label>
-        <label class="check">
-          <input type="checkbox" name="jlpUseGpu" bind:checked={kangJlpUseGpu} />
-          <span>Pass <span class="mono">-gpu</span></span>
-        </label>
-        <label class="full">
-          <span>Extra args</span>
-          <input name="jlpExtraArgs" type="text" class="mono" placeholder="-d 18 -ws -w /data/kang.work -wi 300" bind:value={kangJlpExtra} />
-        </label>
-      </div>
-    {:else if kangMode === 'remote-gpu'}
-      <div class="rpc-grid kang-panel">
-        <p class="faint small full kang-hint">
-          Uses <span class="mono">{data.kangaroo.defaults.wrapperPath}</span> over SSH.
-          Passwordless key auth required. Guide: <span class="mono">docs/KANGAROO-GPU.md</span>.
-        </p>
-        <label class="full">
-          <span>SSH host <em class="faint">(required — user@gpu-box)</em></span>
-          <input name="sshHost" type="text" class="mono" placeholder="adam@gpu-3090" bind:value={kangSshHost} autocomplete="off" />
-        </label>
-        <label class="full">
-          <span>Remote kangaroo binary</span>
-          <input name="remoteBin" type="text" class="mono" placeholder={data.kangaroo.defaults.remoteBin} bind:value={kangRemoteBin} />
-        </label>
-        <label>
-          <span>GPU id(s) on remote</span>
-          <input name="jlpGpuId" type="text" class="mono" placeholder="0" bind:value={kangJlpGpuId} />
-        </label>
-        <label class="full">
-          <span>SSH options <em class="faint">(optional)</em></span>
-          <input name="sshOpts" type="text" class="mono" placeholder="-o BatchMode=yes -i ~/.ssh/id_ed25519_gpu" bind:value={kangSshOpts} />
-        </label>
-        <label class="full">
-          <span>Extra remote args</span>
-          <input name="jlpExtraArgs" type="text" class="mono" placeholder="-d 18 -ws -w /data/kang.work -wi 300" bind:value={kangJlpExtra} />
-        </label>
-        <label class="full">
-          <span>Local SSH wrapper path</span>
-          <input name="wrapperPath" type="text" class="mono" placeholder={data.kangaroo.defaults.wrapperPath} bind:value={kangWrapper} />
-        </label>
-        <!-- keep jlpUseGpu on for remote (wrapper always passes -gpu) -->
-        <input type="hidden" name="jlpUseGpu" value="on" />
-      </div>
-    {:else if kangMode === 'custom'}
-      <div class="rpc-grid kang-panel">
-        <label class="full">
-          <span>Command template <em class="faint">({'{pubkey} {lo} {hi} {lo64} {hi64} {threads} {puzzle}'})</em></span>
-          <input
-            name="externalCmd"
-            type="text"
-            class="mono"
-            placeholder={'./scripts/my-wrapper.sh {pubkey} {lo} {hi}'}
-            bind:value={kangExternal}
-          />
-        </label>
-        <p class="faint small full">
-          Process must emit JSONL: progress / found / exhausted / cancelled / error.
-          Demo: <span class="mono">scripts/kangaroo-external-echo.sh</span>.
-        </p>
-      </div>
-    {:else}
-      <p class="faint small kang-panel">
-        Uses <span class="mono">satoshi-kangaroo</span> on this machine
-        (<span class="mono">npm run grind:build</span>). No GPU config needed.
-      </p>
-      <!-- preserve remote fields when switching modes so they are not wiped -->
-      <input type="hidden" name="sshHost" value={kangSshHost} />
-      <input type="hidden" name="sshOpts" value={kangSshOpts} />
-      <input type="hidden" name="remoteBin" value={kangRemoteBin} />
-      <input type="hidden" name="wrapperPath" value={kangWrapper} />
-      <input type="hidden" name="jlpBin" value={kangJlpBin} />
-      <input type="hidden" name="jlpExtraArgs" value={kangJlpExtra} />
-      <input type="hidden" name="jlpGpuId" value={kangJlpGpuId} />
-      <input type="hidden" name="externalCmd" value={kangExternal} />
-    {/if}
+  <table class="kang-table">
+    <thead>
+      <tr>
+        <th>On</th>
+        <th>Name</th>
+        <th>Kind</th>
+        <th>Target</th>
+        <th>Status</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {#each data.kangaroo.runners as r}
+        <tr class:dim={!r.enabled}>
+          <td>
+            <form method="POST" action="?/toggleKangarooRunner" use:enhance={track('tog-kang')}>
+              <input type="hidden" name="id" value={r.id} />
+              <input type="hidden" name="enabled" value={r.enabled ? 'false' : 'true'} />
+              <button type="submit" class="linkish" title={r.enabled ? 'Disable' : 'Enable'}>
+                {r.enabled ? '✓' : '–'}
+              </button>
+            </form>
+          </td>
+          <td><b>{r.name}</b></td>
+          <td class="mono faint">{r.kind}</td>
+          <td class="mono small">
+            {#if r.kind === 'remote-gpu'}{r.sshHost || '—'}
+            {:else if r.kind === 'local-gpu'}{r.jlpBin || '—'}
+            {:else if r.kind === 'custom'}{r.externalCmd.slice(0, 40) || '—'}
+            {:else}local CPU{/if}
+          </td>
+          <td class="small">
+            {#if r.available}<span class="ok-text">ready</span>{:else}<span class="warn">not ready</span>{/if}
+            <span class="faint"> · {r.detail}</span>
+          </td>
+          <td class="r actions-cell">
+            <button type="button" class="linkish" on:click={() => startEdit(r)}>Edit</button>
+            {#if r.kind === 'remote-gpu' && r.sshHost}
+              <form method="POST" action="?/testKangarooRemote" use:enhance={testRunner(r.id)} class="inline">
+                <input type="hidden" name="sshHost" value={r.sshHost} />
+                <input type="hidden" name="sshOpts" value={r.sshOpts} />
+                <input type="hidden" name="remoteBin" value={r.remoteBinResolved} />
+                <button type="submit" class="linkish" disabled={!!busy}>
+                  {busy === testKey(r.id) ? 'Testing…' : 'Test'}
+                </button>
+              </form>
+            {/if}
+            <form method="POST" action="?/deleteKangarooRunner" use:enhance={track('del-kang')} class="inline">
+              <input type="hidden" name="id" value={r.id} />
+              <button type="submit" class="linkish danger-link">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {#if busy === testKey(r.id)}
+          <tr class="probe-row">
+            <td colspan="6">
+              <div class="kang-probe faint">Probing {r.sshHost} over SSH — up to 20s…</div>
+            </td>
+          </tr>
+        {:else if kangTestResult?.id === r.id}
+          <tr class="probe-row">
+            <td colspan="6">
+              <div class="kang-probe" class:ok={kangTestResult.ok} class:bad={!kangTestResult.ok}>
+                {kangTestResult.text}
+              </div>
+              <button type="button" class="linkish" on:click={() => (kangTestResult = null)}>
+                Dismiss
+              </button>
+            </td>
+          </tr>
+        {/if}
+      {/each}
+    </tbody>
+  </table>
 
-    {#if kangMode === 'local-gpu' || kangMode === 'remote-gpu'}
-      <!-- preserve fields not shown in the other GPU panel -->
-      {#if kangMode === 'local-gpu'}
-        <input type="hidden" name="sshHost" value={kangSshHost} />
-        <input type="hidden" name="sshOpts" value={kangSshOpts} />
-        <input type="hidden" name="remoteBin" value={kangRemoteBin} />
-        <input type="hidden" name="wrapperPath" value={kangWrapper} />
-        <input type="hidden" name="externalCmd" value={kangExternal} />
-      {:else}
-        <input type="hidden" name="jlpBin" value={kangJlpBin} />
-        <input type="hidden" name="externalCmd" value="" />
-      {/if}
-    {:else if kangMode === 'custom'}
-      <input type="hidden" name="sshHost" value={kangSshHost} />
-      <input type="hidden" name="sshOpts" value={kangSshOpts} />
-      <input type="hidden" name="remoteBin" value={kangRemoteBin} />
-      <input type="hidden" name="wrapperPath" value={kangWrapper} />
-      <input type="hidden" name="jlpBin" value={kangJlpBin} />
-      <input type="hidden" name="jlpExtraArgs" value={kangJlpExtra} />
-      <input type="hidden" name="jlpGpuId" value={kangJlpGpuId} />
-    {/if}
+  <div class="actions" style="margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+    <button type="button" class="secondary" on:click={() => startAdd('remote-gpu')}>+ Remote GPU</button>
+    <button type="button" class="secondary" on:click={() => startAdd('cpu')}>+ CPU</button>
+    <button type="button" class="secondary" on:click={() => startAdd('local-gpu')}>+ Local CUDA</button>
+    <button type="button" class="secondary" on:click={() => startAdd('custom')}>+ Custom</button>
+  </div>
 
-    <p class="faint small">
-      Stock JeanLucPons ≈ 125-bit interval limit. Switching mode here
-      <b>enables</b> that runner for the next kangaroo start (Grinder UI or
-      <span class="mono">npm run kangaroo</span>).
-    </p>
-    <div class="actions">
-      <button type="submit" disabled={!!busy}>
-        {busy === 'save-kangaroo' ? 'Saving…' : 'Save & enable runner'}
-      </button>
-    </div>
-  </form>
-
-  {#if kangMode === 'remote-gpu'}
+  {#if showEditor}
     <form
       method="POST"
-      action="?/testKangarooRemote"
-      class="rpc-form kang-test"
-      use:enhance={track('test-kangaroo-remote')}
+      action="?/saveKangarooRunner"
+      class="rpc-form kang-panel"
+      use:enhance={track('save-kang-runner')}
     >
-      <input type="hidden" name="sshHost" value={kangSshHost} />
-      <input type="hidden" name="sshOpts" value={kangSshOpts} />
-      <input type="hidden" name="remoteBin" value={kangRemoteBin} />
-      <div class="actions">
-        <button type="submit" class="secondary" disabled={!!busy || !kangSshHost}>
-          {busy === 'test-kangaroo-remote' ? 'Probing…' : 'Test SSH + GPU'}
-        </button>
+      <input type="hidden" name="id" value={editId} />
+      <h3 class="kang-edit-title">{editId ? 'Edit runner' : 'Add runner'}</h3>
+      <div class="rpc-grid">
+        <label>
+          <span>Name</span>
+          <input name="name" type="text" bind:value={editName} required />
+        </label>
+        <label>
+          <span>Kind</span>
+          <select name="kind" bind:value={editKind}>
+            <option value="cpu">CPU (this machine)</option>
+            <option value="local-gpu">Local CUDA</option>
+            <option value="remote-gpu">Remote GPU (SSH)</option>
+            <option value="custom">Custom JSONL command</option>
+          </select>
+        </label>
+        <label class="check full">
+          <input type="checkbox" name="enabled" bind:checked={editEnabled} />
+          <span>Enabled for multi-runner races (Grinder default)</span>
+        </label>
+
+        {#if editKind === 'remote-gpu'}
+          <label class="full">
+            <span>SSH host <em class="faint">user@100.x.x.x</em></span>
+            <input name="sshHost" type="text" class="mono" bind:value={editSshHost} placeholder="user@100.120.88.104" autocomplete="off" />
+          </label>
+          <label class="full">
+            <span>Remote binary</span>
+            <input name="remoteBin" type="text" class="mono" bind:value={editRemoteBin} />
+          </label>
+          <label>
+            <span>GPU id</span>
+            <input name="jlpGpuId" type="text" class="mono" bind:value={editJlpGpuId} />
+          </label>
+          <label class="full">
+            <span>SSH options</span>
+            <input name="sshOpts" type="text" class="mono" bind:value={editSshOpts} />
+          </label>
+          <label class="full">
+            <span>Extra remote args</span>
+            <input name="jlpExtraArgs" type="text" class="mono" bind:value={editJlpExtra} placeholder="-d 18 -ws -w /data/kang.work -wi 300" />
+          </label>
+          <label class="full">
+            <span>Local wrapper</span>
+            <input name="wrapperPath" type="text" class="mono" bind:value={editWrapper} />
+          </label>
+          <input type="hidden" name="jlpUseGpu" value="on" />
+        {:else if editKind === 'local-gpu'}
+          <label class="full">
+            <span>JLP binary path</span>
+            <input name="jlpBin" type="text" class="mono" bind:value={editJlpBin} placeholder="/opt/Kangaroo/kangaroo" />
+          </label>
+          <label>
+            <span>GPU id</span>
+            <input name="jlpGpuId" type="text" class="mono" bind:value={editJlpGpuId} />
+          </label>
+          <label class="check">
+            <input type="checkbox" name="jlpUseGpu" bind:checked={editJlpUseGpu} />
+            <span>-gpu</span>
+          </label>
+          <label class="full">
+            <span>Extra args</span>
+            <input name="jlpExtraArgs" type="text" class="mono" bind:value={editJlpExtra} />
+          </label>
+        {:else if editKind === 'custom'}
+          <label class="full">
+            <span>Command template</span>
+            <input name="externalCmd" type="text" class="mono" bind:value={editExternal} placeholder={'./wrapper.sh {pubkey} {lo} {hi}'} />
+          </label>
+        {/if}
       </div>
-      <p class="faint small">Runs <span class="mono">nvidia-smi -L</span> and <span class="mono">kangaroo -l</span> on the remote host (uses form values, even if not saved yet).</p>
+      <div class="actions">
+        <button type="submit" disabled={!!busy}>
+          {busy === 'save-kang-runner' ? 'Saving…' : 'Save runner'}
+        </button>
+        <button type="button" class="secondary" on:click={() => (showEditor = false)}>Cancel</button>
+      </div>
+      <p class="faint small">Guide: <span class="mono">docs/KANGAROO-GPU.md</span>. Enabled runners race together on Start kangaroo.</p>
     </form>
   {/if}
 </div>
@@ -796,17 +851,68 @@
     color: var(--danger);
   }
   .kang-panel {
-    margin-top: 10px;
-    padding-top: 10px;
+    margin-top: 14px;
+    padding-top: 12px;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
   }
-  .kang-hint {
-    margin: 0 0 8px;
+  .kang-table {
+    width: 100%;
+    font-size: 13px;
+    border-collapse: collapse;
   }
-  .kang-test {
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  .kang-table th,
+  .kang-table td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    vertical-align: top;
+  }
+  .kang-table tr.dim {
+    opacity: 0.55;
+  }
+  .kang-table tr.probe-row td {
+    padding-top: 0;
+  }
+  .kang-probe {
+    white-space: pre-wrap;
+    font-family: var(--mono);
+    font-size: 12px;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin: 2px 0 6px;
+    max-height: 220px;
+    overflow: auto;
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .kang-probe.ok {
+    color: var(--success);
+  }
+  .kang-probe.bad {
+    color: var(--danger);
+  }
+  .kang-table .small {
+    font-size: 12px;
+  }
+  .actions-cell {
+    white-space: nowrap;
+  }
+  .actions-cell .inline {
+    display: inline;
+  }
+  button.linkish {
+    background: none;
+    border: none;
+    color: var(--accent-soft);
+    cursor: pointer;
+    padding: 0 6px;
+    font: inherit;
+  }
+  button.linkish.danger-link {
+    color: var(--danger);
+  }
+  .kang-edit-title {
+    margin: 0 0 10px;
+    font-size: 14px;
   }
   .rpc-grid .full {
     grid-column: 1 / -1;
@@ -841,13 +947,23 @@
     padding: 10px 14px;
     font-size: 13px;
     margin-bottom: 16px;
+    /* This page is long enough that a static toast reports into empty space for
+       any form below the fold. Sticking it under the 58px layout header keeps
+       every action's result visible from wherever it was triggered. */
+    position: sticky;
+    top: 58px;
+    z-index: 9;
+    /* Opaque base so the pinned toast stays legible over scrolling content;
+       the ok/err tints layer on top as a background-image. */
+    background: rgba(26, 16, 64, 0.94);
+    backdrop-filter: blur(10px);
   }
   .ok-toast {
-    background: rgba(123, 255, 160, 0.09);
+    background-image: linear-gradient(rgba(123, 255, 160, 0.09), rgba(123, 255, 160, 0.09));
     border: 1px solid rgba(123, 255, 160, 0.3);
   }
   .err-toast {
-    background: rgba(255, 87, 87, 0.1);
+    background-image: linear-gradient(rgba(255, 87, 87, 0.1), rgba(255, 87, 87, 0.1));
     border: 1px solid rgba(255, 87, 87, 0.3);
     color: var(--danger);
   }

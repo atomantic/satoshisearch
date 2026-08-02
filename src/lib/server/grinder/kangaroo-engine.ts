@@ -1,21 +1,20 @@
 /**
- * Kangaroo engine — runs Pollard's kangaroo against exposed (pubkey-known)
- * puzzle targets via the native `satoshi-kangaroo` binary.
- *
- * Separate from the sequential grinder: different algorithm, different work unit
- * (EC group ops ≈ 2·√interval), same hit/rescue pipeline on success.
+ * Kangaroo engine — races one or more runners (CPU / local CUDA / remote GPUs)
+ * against exposed puzzle targets.
  */
-import { openDb, nowSec } from '../db';
 import { puzzleHalfBits } from '../keyspace';
+import { openDb, nowSec } from '../db';
 import { audit } from '../rescue/audit';
 import { findTargetByMatch } from './loadset';
 import { recordHit } from './hit';
 import {
   kangarooAvailability,
-  runKangaroo,
+  runKangarooMulti,
   type KangarooProgress,
-  type KangarooRunResult
+  type KangarooRunResult,
+  type MultiKangarooProgress
 } from './kangaroo-backends';
+import { listKangarooRunners, type ResolvedKangarooRunner } from './kangaroo-runners';
 import type { KangarooBackend } from '../settings';
 
 export type ExposedPuzzle = {
@@ -25,15 +24,27 @@ export type ExposedPuzzle = {
   rangeLo: string;
   rangeHi: string;
   balance: number;
-  /** Effective kangaroo work bits — see puzzleHalfBits(). */
   halfBits: number;
   targetId: number;
+};
+
+export type RunnerLiveStatus = {
+  id: string;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  available: boolean;
+  detail: string;
+  sshHost: string;
+  /** idle | running | found | error | cancelled | exhausted */
+  status: string;
+  ops: number;
+  opsPerSec: number;
 };
 
 export type KangarooStatus = {
   available: boolean;
   backend: KangarooBackend;
-  /** cpu | local-gpu | remote-gpu | custom */
   mode: string;
   backendDetail: string;
   sshHost: string | null;
@@ -48,6 +59,10 @@ export type KangarooStatus = {
   startedAt: number | null;
   lastResult: string | null;
   hits: number;
+  /** Configured runners with live counters when a job is active. */
+  runners: RunnerLiveStatus[];
+  /** Runner ids selected for the current (or last) job. */
+  activeRunnerIds: string[];
 };
 
 function listExposedFromDb(): ExposedPuzzle[] {
@@ -85,7 +100,6 @@ function listExposedFromDb(): ExposedPuzzle[] {
 
 class KangarooEngine {
   private running = false;
-  /** The puzzle this run is (or last was) against; puzzleN/address/halfBits derive from it. */
   private target: ExposedPuzzle | null = null;
   private ops = 0;
   private opsPerSec = 0;
@@ -95,8 +109,27 @@ class KangarooEngine {
   private lastResult: string | null = null;
   private hits = 0;
   private cancel: (() => void) | null = null;
-  /** Resolves when the current run settles; lets stop() wait for the real exit. */
   private done: Promise<void> | null = null;
+  private activeRunnerIds: string[] = [];
+  private live = new Map<string, { status: string; ops: number; opsPerSec: number }>();
+
+  private runnerSnapshot(): RunnerLiveStatus[] {
+    return listKangarooRunners().map((r) => {
+      const live = this.live.get(r.id);
+      return {
+        id: r.id,
+        name: r.name,
+        kind: r.kind,
+        enabled: r.enabled,
+        available: r.available,
+        detail: r.detail,
+        sshHost: r.sshHost,
+        status: live?.status ?? (this.running && this.activeRunnerIds.includes(r.id) ? 'running' : 'idle'),
+        ops: live?.ops ?? 0,
+        opsPerSec: live?.opsPerSec ?? 0
+      };
+    });
+  }
 
   get status(): KangarooStatus {
     const avail = kangarooAvailability();
@@ -116,7 +149,9 @@ class KangarooEngine {
       elapsedMs: this.elapsedMs,
       startedAt: this.startedAt,
       lastResult: this.lastResult,
-      hits: this.hits
+      hits: this.hits,
+      runners: this.runnerSnapshot(),
+      activeRunnerIds: [...this.activeRunnerIds]
     };
   }
 
@@ -124,7 +159,15 @@ class KangarooEngine {
     return listExposedFromDb();
   }
 
-  async start(puzzleN: number): Promise<void> {
+  listRunners(): ResolvedKangarooRunner[] {
+    return listKangarooRunners();
+  }
+
+  /**
+   * @param puzzleN puzzle number
+   * @param runnerIds optional subset; omit / empty = all enabled+available
+   */
+  async start(puzzleN: number, runnerIds?: string[]): Promise<void> {
     if (this.running) await this.stop();
     const avail = kangarooAvailability();
     if (!avail.available) {
@@ -136,6 +179,16 @@ class KangarooEngine {
       throw new Error(`no exposed funded puzzle #${puzzleN} with stored pubkey`);
     }
 
+    const ids = runnerIds?.length ? runnerIds : undefined;
+    const selected = avail.runners.filter((r) => {
+      if (ids) return ids.includes(r.id);
+      return r.enabled && r.available;
+    });
+    const use = selected.filter((r) => r.available);
+    if (!use.length) {
+      throw new Error('no available runners selected — enable at least one in Settings');
+    }
+
     this.running = true;
     this.target = target;
     this.ops = 0;
@@ -144,6 +197,11 @@ class KangarooEngine {
     this.elapsedMs = 0;
     this.startedAt = nowSec();
     this.lastResult = null;
+    this.activeRunnerIds = use.map((r) => r.id);
+    this.live.clear();
+    for (const r of use) {
+      this.live.set(r.id, { status: 'running', ops: 0, opsPerSec: 0 });
+    }
 
     audit('kangaroo-start', {
       puzzleN: target.n,
@@ -152,11 +210,10 @@ class KangarooEngine {
       balanceSats: target.balance,
       rangeLo: target.rangeLo,
       rangeHi: target.rangeHi,
-      backend: avail.backend,
-      backendDetail: avail.detail
+      runners: use.map((r) => ({ id: r.id, name: r.name, kind: r.kind, sshHost: r.sshHost || null }))
     });
 
-    const { promise, cancel } = runKangaroo({
+    const { promise, cancel } = runKangarooMulti(use.map((r) => r.id), {
       pubkeyHex: target.pubkey,
       loHex: target.rangeLo,
       hiHex: target.rangeHi,
@@ -166,12 +223,17 @@ class KangarooEngine {
         this.opsPerSec = p.opsPerSec;
         this.dps = p.dps;
         this.elapsedMs = p.elapsedMs;
+      },
+      onRunnerProgress: (p: MultiKangarooProgress) => {
+        this.live.set(p.runnerId, {
+          status: 'running',
+          ops: p.ops,
+          opsPerSec: p.opsPerSec
+        });
       }
     });
     this.cancel = cancel;
 
-    // Detach — status is polled from the UI; errors are audited. stop() awaits
-    // `done` so it reports finished only once the child has actually exited.
     this.done = promise
       .then((res) => this.onDone(target, res))
       .catch((err) => {
@@ -179,6 +241,10 @@ class KangarooEngine {
         audit('kangaroo-error', { puzzleN: target.n, error: String(err) });
         this.running = false;
         this.cancel = null;
+        for (const id of this.activeRunnerIds) {
+          const prev = this.live.get(id);
+          this.live.set(id, { status: 'error', ops: prev?.ops ?? 0, opsPerSec: 0 });
+        }
       });
   }
 
@@ -189,10 +255,13 @@ class KangarooEngine {
     if (res.status === 'error') {
       this.lastResult = `error: ${res.message}`;
       audit('kangaroo-error', { puzzleN: target.n, error: res.message });
+      for (const id of this.activeRunnerIds) {
+        const prev = this.live.get(id);
+        this.live.set(id, { status: 'error', ops: prev?.ops ?? 0, opsPerSec: 0 });
+      }
       return;
     }
 
-    // Every non-error result carries the run's final counters.
     this.ops = res.ops;
     this.elapsedMs = res.elapsedMs;
 
@@ -200,11 +269,20 @@ class KangarooEngine {
       this.hits++;
       this.dps = res.dps;
       this.lastResult = `found puzzle #${target.n}`;
+      for (const id of this.activeRunnerIds) {
+        const prev = this.live.get(id);
+        this.live.set(id, { status: 'found', ops: prev?.ops ?? res.ops, opsPerSec: 0 });
+      }
       await this.recordHit(target, res.privHex, res.ops);
       return;
     }
 
+    const st = res.status === 'exhausted' ? 'exhausted' : 'cancelled';
     this.lastResult = res.status === 'exhausted' ? 'exhausted max-ops' : 'cancelled';
+    for (const id of this.activeRunnerIds) {
+      const prev = this.live.get(id);
+      this.live.set(id, { status: st, ops: prev?.ops ?? res.ops, opsPerSec: 0 });
+    }
     audit('kangaroo-stop', { puzzleN: target.n, reason: res.status, ops: res.ops });
   }
 
@@ -228,8 +306,6 @@ class KangarooEngine {
     if (!this.running) return;
     this.cancel?.();
     this.cancel = null;
-    // Wait for the child to actually exit rather than guessing at a delay —
-    // otherwise a restart can leave two full-core processes running at once.
     await this.done;
     this.running = false;
   }
