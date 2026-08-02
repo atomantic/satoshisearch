@@ -97,12 +97,18 @@ export async function classifyPuzzle(scriptHex: string): Promise<{
   };
 }
 
-/** Locate the input that spends this script and pull the revealed pubkey out of it. */
+/**
+ * Locate the *earliest* input that spends this script and pull the revealed
+ * pubkey out of it. Earliest = the actual solve/reveal event; using the most
+ * recent spend would misdate long-solved puzzles (and invert the frontier
+ * trend). `scriptTxsAll` returns newest-first, so we take the min-height match.
+ */
 function findSpend(
   txs: Tx[],
   scriptHex: string
 ): { txid: string; height: number | null; pubkey: string | null } | null {
   const targetHash = scriptHex.toLowerCase();
+  let best: { txid: string; height: number | null; pubkey: string | null } | null = null;
   for (const tx of txs) {
     for (const vin of tx.vin) {
       if (!vin.prevout) continue;
@@ -114,10 +120,13 @@ function findSpend(
       if (m) pubkey = m[1];
       // SegWit: witness[last] is the pubkey.
       if (!pubkey && vin.witness && vin.witness.length) pubkey = vin.witness[vin.witness.length - 1];
-      return { txid: tx.txid, height: tx.status.block_height ?? null, pubkey };
+      const height = tx.status.block_height ?? null;
+      if (!best || (height != null && (best.height == null || height < best.height))) {
+        best = { txid: tx.txid, height, pubkey };
+      }
     }
   }
-  return null;
+  return best;
 }
 
 /** Full index: derive targets, classify each, upsert target + puzzle rows. */
