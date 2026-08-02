@@ -42,6 +42,34 @@ npm run dev                   # http://localhost:3117
 npm test                      # unit tests (script/P2PK primitives)
 ```
 
+## Access over Tailscale
+
+The app binds to all interfaces, so it's reachable at your machine's MagicDNS name on port 3117.
+
+**Dev** (`npm run dev`) — works out of the box; any `*.ts.net` host is allowed:
+
+```
+http://<machine>.<tailnet>.ts.net:3117
+```
+
+**Production** (`npm run build && npm start`) — form submissions are CSRF-checked against the request
+origin, and over plain HTTP the server can't infer the scheme, so tell it the URL you browse to:
+
+```sh
+ORIGIN=http://<machine>.<tailnet>.ts.net:3117 npm start
+```
+
+**Nicer: HTTPS via Tailscale Serve** — get a real cert and drop the port, no `ORIGIN` needed if you
+forward the scheme header:
+
+```sh
+tailscale serve --bg 3117                    # proxies https://<machine>.<tailnet>.ts.net → :3117
+PROTOCOL_HEADER=x-forwarded-proto npm start  # Tailscale sets x-forwarded-proto: https
+```
+
+Then browse to `https://<machine>.<tailnet>.ts.net`. On Umbrel, the app's built-in proxy already
+handles this — access it the way you reach any other Umbrel app.
+
 ## Safety posture
 
 - Auto-sweep is **off by default** except for the puzzle bucket (the one class explicitly designed
