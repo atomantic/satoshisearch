@@ -1,47 +1,107 @@
 import type { PageServerLoad, Actions } from './$types';
 import { fail } from '@sveltejs/kit';
-import { config } from '$server/config';
+import { config, WHITEHAT_ATTESTATION_TEXT, BUCKETS } from '$server/config';
 import { openDb } from '$server/db';
 import { tipHeight, recommendedFees } from '$server/mempool';
 import { isVaultConfigured } from '$server/rescue/vault';
 import { isLocalNode } from '$server/links';
 import { indexPuzzles } from '$server/indexer/puzzles';
 import { sweep } from '$server/sweep';
+import { decodeBitcoinAddress, SINGLE_KEY_SCRIPT_TYPE_LIST } from '$server/script';
+import { generateRescueWallet } from '$server/bitcoin/wallet';
+import {
+  bitcoinRpcPublicView,
+  updateSettings,
+  clearBitcoinRpcSettings,
+  clearRescueSettings,
+  loadSettings,
+  effectiveRescue,
+  effectiveRuntime,
+  effectiveRichlist,
+  effectiveGrind,
+  vaultKeyStatusView,
+  generateVaultKey
+} from '$server/settings';
+import { getBlockchainInfo, isRpcConfigured, resolveRpcAuth } from '$server/bitcoin/rpc';
+import { audit } from '$server/rescue/audit';
 
 export const load: PageServerLoad = async () => {
   const db = openDb();
   const counts = db
-    .prepare(
-      `SELECT dataset, COUNT(*) c FROM target GROUP BY dataset`
-    )
+    .prepare(`SELECT dataset, COUNT(*) c FROM target GROUP BY dataset`)
     .all() as Array<{ dataset: string; c: number }>;
   const runs = db
     .prepare(`SELECT kind, MAX(finished_at) last, SUM(processed) processed FROM scan_run GROUP BY kind`)
     .all() as Array<{ kind: string; last: number | null; processed: number }>;
 
-  let node: { ok: boolean; tip: number | null; fastestFee: number | null } = { ok: false, tip: null, fastestFee: null };
-  try {
-    const [tip, fees] = await Promise.all([tipHeight(), recommendedFees().catch(() => null)]);
-    node = { ok: true, tip, fastestFee: fees?.fastestFee ?? null };
-  } catch {
-    node = { ok: false, tip: null, fastestFee: null };
-  }
+  // The mempool/Esplora and Bitcoin Core probes are independent — run them
+  // together so a slow node doesn't add its latency to the other's. Each keeps
+  // its own catch so a failing probe degrades to a status line, never a 500.
+  const [node, rpcProbe] = await Promise.all([
+    Promise.all([tipHeight(), recommendedFees().catch(() => null)])
+      .then(([tip, fees]) => ({
+        ok: true,
+        tip: tip as number | null,
+        fastestFee: fees?.fastestFee ?? null
+      }))
+      .catch(() => ({ ok: false, tip: null as number | null, fastestFee: null as number | null })),
+    isRpcConfigured()
+      ? getBlockchainInfo()
+          .then((info) => ({
+            ok: true,
+            message: `${info.chain} · height ${info.blocks.toLocaleString()} · ${info.bestblockhash.slice(0, 12)}…`
+          }))
+          .catch((e) => ({ ok: false, message: String(e instanceof Error ? e.message : e) }))
+      : Promise.resolve(null)
+  ]);
+
+  const rpcView = bitcoinRpcPublicView();
+
+  const rescue = effectiveRescue();
+  const runtime = effectiveRuntime();
+  const grind = effectiveGrind();
+  const richlist = effectiveRichlist();
 
   return {
     node,
     isLocal: isLocalNode(),
-    config: {
-      mempoolApiUrl: config.mempoolApiUrl,
-      concurrency: config.concurrency,
-      coinbaseMaxHeight: config.coinbaseMaxHeight,
-      dataDir: config.dataDir,
-      dryRun: config.rescue.dryRun,
-      dest: config.rescue.destAddress,
-      autoBuckets: [...config.rescue.autoBuckets],
-      whitehatAttested: config.rescue.whitehatAttested,
-      dustSats: config.rescue.dustSats,
+    buckets: [...BUCKETS],
+    scriptTypes: [...SINGLE_KEY_SCRIPT_TYPE_LIST],
+    dataDir: config.dataDir,
+    rescue: {
+      destAddress: rescue.destAddress,
+      dryRun: rescue.dryRun,
+      dustSats: rescue.dustSats,
+      autoBuckets: [...rescue.autoBuckets],
+      whitehatAttested: rescue.whitehatAttested,
+      source: rescue.source,
       vaultReady: isVaultConfigured()
     },
+    runtime: {
+      mempoolApiUrl: runtime.mempoolApiUrl,
+      concurrency: runtime.concurrency,
+      coinbaseMaxHeight: runtime.coinbaseMaxHeight,
+      source: runtime.source
+    },
+    grind: {
+      pace: grind.pace,
+      maxWorkers: grind.maxWorkers,
+      throttleMs: grind.throttleMs,
+      batchScale: grind.batchScale,
+      source: grind.source,
+      /** Raw overrides as stored (null = use pace default). */
+      stored: loadSettings().grind
+    },
+    richlist: {
+      minSats: richlist.minSats,
+      scriptPolicy: richlist.scriptPolicy,
+      loyceUrl: richlist.loyceUrl,
+      source: richlist.source
+    },
+    vault: vaultKeyStatusView(),
+    bitcoinRpc: rpcView,
+    rpcProbe,
+    fulcrum: loadSettings().fulcrum,
     counts,
     runs
   };
@@ -58,6 +118,212 @@ export const actions: Actions = {
   },
   recheckFunded: async () => {
     const res = await sweep({ onlyFunded: true });
-    return { done: `Re-checked ${res.scanned} funded targets in ${(res.elapsedMs / 1000).toFixed(1)}s · ${res.moved.length} moved.` };
+    return {
+      done: `Re-checked ${res.scanned} funded targets in ${(res.elapsedMs / 1000).toFixed(1)}s · ${res.moved.length} moved.`
+    };
+  },
+
+  saveBitcoinRpc: async ({ request }) => {
+    const data = await request.formData();
+    const url = String(data.get('url') ?? '').trim();
+    const user = String(data.get('user') ?? '').trim();
+    const password = String(data.get('password') ?? '');
+    const cookie = String(data.get('cookie') ?? '').trim();
+    const fulcrumHost = String(data.get('fulcrumHost') ?? '').trim();
+    const fulcrumPort = Number(data.get('fulcrumPort') ?? 50002);
+
+    if (url && !/^https?:\/\//i.test(url)) {
+      return fail(400, { error: 'RPC URL must start with http:// or https://' });
+    }
+
+    const saved = updateSettings(
+      {
+        bitcoinRpc: { url, user, password, cookie },
+        fulcrum: {
+          host: fulcrumHost,
+          port: Number.isFinite(fulcrumPort) && fulcrumPort > 0 ? fulcrumPort : 50002
+        }
+      },
+      { keepPasswordIfEmpty: true }
+    );
+
+    audit('settings-rpc-saved', {
+      url: saved.bitcoinRpc.url || null,
+      user: saved.bitcoinRpc.user || null,
+      passwordSet: !!saved.bitcoinRpc.password,
+      cookieSet: !!saved.bitcoinRpc.cookie,
+      fulcrumHost: saved.fulcrum.host || null,
+      fulcrumPort: saved.fulcrum.port
+    });
+
+    return { done: 'Saved Bitcoin RPC settings to data/settings.json.' };
+  },
+
+  testBitcoinRpc: async ({ request }) => {
+    const data = await request.formData();
+    // Optional: test form values without saving (password empty → use stored)
+    const url = String(data.get('url') ?? '').trim();
+    const user = String(data.get('user') ?? '').trim();
+    const password = String(data.get('password') ?? '');
+    const cookie = String(data.get('cookie') ?? '').trim();
+
+    try {
+      // resolveRpcAuth already owns the precedence (override → settings → env →
+      // cookie file). Blank fields must be passed as undefined, not '', because
+      // it merges user/password with ?? — an empty string would win over the
+      // stored credential instead of falling through to it.
+      const auth = resolveRpcAuth({
+        url: url || undefined,
+        user: user || undefined,
+        password: password || undefined,
+        cookie: cookie || undefined
+      });
+
+      const info = await getBlockchainInfo(auth);
+      return {
+        done: `RPC OK — ${info.chain} at height ${info.blocks.toLocaleString()} (${info.bestblockhash.slice(0, 16)}…).`
+      };
+    } catch (e) {
+      return fail(400, { error: `RPC test failed: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  },
+
+  clearBitcoinRpc: async () => {
+    clearBitcoinRpcSettings();
+    audit('settings-rpc-cleared', {});
+    return { done: 'Cleared Bitcoin RPC settings from data/settings.json (env fallbacks still apply if set).' };
+  },
+
+  saveRescue: async ({ request }) => {
+    const data = await request.formData();
+    const destAddress = String(data.get('destAddress') ?? '').trim();
+    const dryRun = data.get('dryRun') === 'on';
+    const dustSats = Number(data.get('dustSats') ?? 10_000);
+    const autoBuckets = data.getAll('autoBuckets').map((b) => String(b));
+    const attestationInput = String(data.get('whitehatAttestation') ?? '').trim().toLowerCase();
+    const whitehatAttested = attestationInput === WHITEHAT_ATTESTATION_TEXT;
+
+    if (destAddress && !decodeBitcoinAddress(destAddress)) {
+      return fail(400, { error: `"${destAddress}" is not a valid mainnet Bitcoin address.` });
+    }
+    if (!Number.isFinite(dustSats) || dustSats < 0) {
+      return fail(400, { error: 'Dust floor must be a non-negative number of sats.' });
+    }
+
+    updateSettings({ rescue: { destAddress, dryRun, dustSats, autoBuckets, whitehatAttested } });
+
+    audit('settings-rescue-saved', {
+      destAddress: destAddress || null,
+      dryRun,
+      dustSats,
+      autoBuckets,
+      whitehatAttested
+    });
+
+    return { done: 'Saved rescue policy to data/settings.json.' };
+  },
+
+  clearRescue: async () => {
+    clearRescueSettings();
+    audit('settings-rescue-cleared', {});
+    return { done: 'Cleared rescue policy overrides from data/settings.json (env fallbacks apply if set).' };
+  },
+
+  generateRescueWallet: async () => {
+    const wallet = generateRescueWallet();
+    audit('settings-rescue-wallet-generated', { address: wallet.address, path: wallet.path });
+    return { mnemonic: wallet.mnemonic, address: wallet.address };
+  },
+
+  useGeneratedRescueAddress: async ({ request }) => {
+    const data = await request.formData();
+    const address = String(data.get('address') ?? '').trim();
+    if (!address || !decodeBitcoinAddress(address)) {
+      return fail(400, { error: 'No valid generated address to use — generate a new wallet first.' });
+    }
+    updateSettings({ rescue: { destAddress: address } });
+    audit('settings-rescue-address-set', { address, generated: true });
+    return { done: `Rescue destination set to ${address}.` };
+  },
+
+  saveRuntime: async ({ request }) => {
+    const data = await request.formData();
+    const mempoolApiUrl = String(data.get('mempoolApiUrl') ?? '').trim();
+    const concurrency = Number(data.get('concurrency') ?? 8);
+    const coinbaseMaxHeight = Number(data.get('coinbaseMaxHeight') ?? 50_000);
+
+    if (mempoolApiUrl && !/^https?:\/\//i.test(mempoolApiUrl)) {
+      return fail(400, { error: 'Mempool API URL must start with http:// or https://' });
+    }
+    if (!Number.isFinite(concurrency) || concurrency < 1) {
+      return fail(400, { error: 'Concurrency must be a positive number.' });
+    }
+    if (!Number.isFinite(coinbaseMaxHeight) || coinbaseMaxHeight < 0) {
+      return fail(400, { error: 'Coinbase max height must be a non-negative number.' });
+    }
+
+    updateSettings({ runtime: { mempoolApiUrl, concurrency, coinbaseMaxHeight } });
+    audit('settings-runtime-saved', { mempoolApiUrl: mempoolApiUrl || null, concurrency, coinbaseMaxHeight });
+    return { done: 'Saved runtime settings to data/settings.json.' };
+  },
+
+  saveGrind: async ({ request }) => {
+    const data = await request.formData();
+    const paceRaw = String(data.get('pace') ?? 'normal').trim();
+    const pace = paceRaw === 'light' || paceRaw === 'full' || paceRaw === 'normal' ? paceRaw : 'normal';
+    const maxWorkersRaw = String(data.get('maxWorkers') ?? '').trim();
+    const throttleRaw = String(data.get('throttleMs') ?? '').trim();
+    const maxWorkers =
+      maxWorkersRaw === '' ? null : Number(maxWorkersRaw);
+    const throttleMs = throttleRaw === '' ? null : Number(throttleRaw);
+
+    if (maxWorkers !== null && (!Number.isFinite(maxWorkers) || maxWorkers < 0 || maxWorkers > 256)) {
+      return fail(400, { error: 'Max workers must be empty (auto) or 0–256.' });
+    }
+    if (throttleMs !== null && (!Number.isFinite(throttleMs) || throttleMs < 0 || throttleMs > 60_000)) {
+      return fail(400, { error: 'Throttle must be empty (auto) or 0–60000 ms.' });
+    }
+
+    updateSettings({
+      grind: {
+        pace,
+        maxWorkers: maxWorkers === 0 ? null : maxWorkers,
+        throttleMs
+      }
+    });
+    audit('settings-grind-saved', { pace, maxWorkers, throttleMs });
+    return {
+      done: `Saved grinder pace: ${pace}${maxWorkers ? ` · max ${maxWorkers} workers` : ''}${throttleMs != null ? ` · ${throttleMs}ms throttle` : ''}. Takes effect on the next grind start.`
+    };
+  },
+
+  saveRichlist: async ({ request }) => {
+    const data = await request.formData();
+    const minSats = Number(data.get('minSats') ?? 100_000_000);
+    const scriptPolicy = data.getAll('scriptPolicy').map(String).join(',');
+    const loyceUrl = String(data.get('loyceUrl') ?? '').trim();
+
+    if (!Number.isFinite(minSats) || minSats < 0) {
+      return fail(400, { error: 'Minimum balance must be a non-negative number of sats.' });
+    }
+    if (loyceUrl && !/^https?:\/\//i.test(loyceUrl)) {
+      return fail(400, { error: 'Loyce URL must start with http:// or https://' });
+    }
+
+    updateSettings({ richlist: { minSats, scriptPolicy, loyceUrl } });
+    audit('settings-richlist-saved', { minSats, scriptPolicy, loyceUrl: loyceUrl || null });
+    return { done: 'Saved richlist thresholds to data/settings.json.' };
+  },
+
+  generateVaultKey: async () => {
+    const result = generateVaultKey();
+    if (!result.generated) {
+      return fail(400, {
+        error:
+          'A vault key is already configured — rotating it would orphan already-encrypted recovered keys, so this cannot be done from the UI.'
+      });
+    }
+    audit('settings-vault-key-generated', {});
+    return { done: 'Generated and saved a new vault key to data/settings.json (mode 0600).' };
   }
 };

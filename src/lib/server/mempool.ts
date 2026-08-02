@@ -9,7 +9,7 @@
  * A tiny bounded-concurrency pool keeps us at the measured sweet spot (~8) so a
  * full 22K sweep finishes in ~1.3 min without hammering the node.
  */
-import { config } from './config';
+import { effectiveRuntime } from './settings';
 import { scriptHash } from './script';
 
 export interface AddressStats {
@@ -60,7 +60,7 @@ class HttpError extends Error {
 }
 
 async function req(path: string, init?: RequestInit, retries = 4): Promise<Response> {
-  const url = `${config.mempoolApiUrl}${path}`;
+  const url = `${effectiveRuntime().mempoolApiUrl}${path}`;
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -206,7 +206,7 @@ export async function broadcastTx(rawHex: string): Promise<string> {
 export async function mapPool<T, R>(
   items: T[],
   worker: (item: T, index: number) => Promise<R>,
-  concurrency = config.concurrency
+  concurrency = effectiveRuntime().concurrency
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
