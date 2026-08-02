@@ -32,8 +32,12 @@ if [[ -z "$SSH_HOST" ]]; then
 fi
 
 REMOTE_BIN="${KANGAROO_JLP_REMOTE_BIN:-/opt/Kangaroo/kangaroo}"
+# Caller opts go first — ssh keeps the first value it sees per option, so these
+# defaults only fill in what the caller left unset. Appending rather than
+# replacing means adding `-i key` doesn't silently drop BatchMode and let a
+# passphrase prompt block a headless run.
 # shellcheck disable=SC2206
-SSH_OPTS=(${KANGAROO_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new})
+SSH_OPTS=(${KANGAROO_SSH_OPTS:-} -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 GPU_ID="${KANGAROO_JLP_GPU_ID:-0}"
 EXTRA="${KANGAROO_JLP_EXTRA:-}"
 

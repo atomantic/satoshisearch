@@ -424,16 +424,27 @@ export const actions: Actions = {
       return fail(400, { error: 'SSH host is empty — set user@gpu-box first.' });
     }
 
-    const opts = sshOpts
-      ? sshOpts.split(/\s+/).filter(Boolean)
-      : ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8'];
+    // Custom opts are layered on top of the defaults rather than replacing them:
+    // otherwise adding an `-i key` here silently drops BatchMode, and a passphrase
+    // prompt hangs the probe until the spawn timeout. ssh takes the first value it
+    // sees for a given option, so user opts go first and the defaults fill the gaps.
+    const opts = [
+      ...(sshOpts ? sshOpts.split(/\s+/).filter(Boolean) : []),
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ConnectTimeout=8'
+    ];
 
     const probe = spawnSync(
       'ssh',
       [
         ...opts,
         sshHost,
-        `nvidia-smi -L 2>/dev/null; command -v '${remoteBin}' && '${remoteBin}' -l 2>/dev/null | head -20; echo __SS_OK__`
+        // /usr/lib/wsl/lib holds nvidia-smi on WSL2 hosts; WSL only puts it on
+        // PATH for shells it launches itself, so an ssh session misses it and
+        // the probe reports no GPU even when the remote kangaroo sees one.
+        `export PATH="$PATH:/usr/lib/wsl/lib"; nvidia-smi -L 2>/dev/null; command -v '${remoteBin}' && '${remoteBin}' -l 2>/dev/null | head -20; echo __SS_OK__`
       ],
       { encoding: 'utf8', timeout: 20_000 }
     );
@@ -443,8 +454,13 @@ export const actions: Actions = {
       return fail(400, { error: `SSH failed to start: ${probe.error.message}` });
     }
     if (probe.status !== 0 && !out.includes('__SS_OK__')) {
+      // The server has no ssh-agent to inherit, so a key that only works because
+      // you type `ssh -i ...` by hand needs to be named here or in ~/.ssh/config.
+      const hint = /Permission denied \(publickey\)/i.test(out)
+        ? '\nHint: add `-i /path/to/key` to SSH options, or give this host an IdentityFile entry in ~/.ssh/config.'
+        : '';
       return fail(400, {
-        error: `SSH probe failed (exit ${probe.status}): ${out.slice(0, 500) || 'no output — check keys / host / BatchMode'}`
+        error: `SSH probe failed (exit ${probe.status}): ${out.slice(0, 500) || 'no output — check keys / host / BatchMode'}${hint}`
       });
     }
 

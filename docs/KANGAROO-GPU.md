@@ -172,6 +172,17 @@ The observatory then connects to the host's Tailscale/LAN address as `<you>@host
 (a `~/.ssh/config` alias keeps `ssh` and `scp` consistent — avoid `-p` in `KANGAROO_SSH_OPTS`,
 which `scp` reads as "preserve times", not port).
 
+The observatory runs `ssh` with no agent to inherit, so a key you normally select by hand
+with `ssh -i` will not be found: give the host an `IdentityFile` line in `~/.ssh/config`
+(preferred — `scp` picks it up too) or add `-i /path/to/key` to the runner's SSH options.
+Both the probe and the wrapper layer your options over their own defaults, so naming a key
+no longer costs you `BatchMode`.
+
+`nvidia-smi` lives in `/usr/lib/wsl/lib` on WSL2 and WSL only puts that on `PATH` for shells
+it launches itself, so an ssh session won't see it. The probe appends that directory before
+looking. Kangaroo itself finds CUDA regardless, so a "GPU #0 …" line from `kangaroo -l` is the
+real signal that the host is ready.
+
 ## Wire-up checklist
 
 ### GPU host
