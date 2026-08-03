@@ -40,13 +40,21 @@ mkdirSync(dirname(out), { recursive: true });
 console.log(`fetching ${url}`);
 console.log(`min_sats=${minSats} (${(minSats / 1e8).toFixed(4)} BTC) → ${out}`);
 
+const attemptsArg = arg(argv, '--attempts');
+const attempts = attemptsArg ? Number(attemptsArg) : undefined;
+
 const started = Date.now();
 const res = await fetchLoyceRichlist({
   url,
   outPath: out,
   minSats,
+  attempts,
   onProgress: (kept, seen) => {
     process.stdout.write(`\r  kept ${kept.toLocaleString()} · scanned ${seen.toLocaleString()}`);
+  },
+  onRetry: (attempt, total, err) => {
+    process.stdout.write('\n');
+    console.warn(`  attempt ${attempt}/${total} failed: ${err.message} — retrying`);
   }
 });
 process.stdout.write('\n');
@@ -54,5 +62,8 @@ process.stdout.write('\n');
 console.log(
   `wrote ${res.kept.toLocaleString()} single-key rows (scanned ${res.seen.toLocaleString()} funded ≥ min) in ${((Date.now() - started) / 1000).toFixed(1)}s`
 );
+if (!res.hitCutoff) {
+  console.log('note: read the dump to its end without reaching the balance cutoff');
+}
 console.log('skipped by type:', res.skippedByType);
 console.log(`\nnext: npm run index:richlist -- --replace ${out}`);

@@ -22,6 +22,8 @@ secrets/
 # Large richlist dumps (fetch locally; do not commit multi‑MB/GB files)
 /datasets/balances-*.tsv
 /datasets/balances-*.tsv.gz
+# In-flight fetch target; renamed over the real file only on a clean download.
+/datasets/*.partial
 /datasets/*.dat
 /data/utxo*.dat
 !/datasets/fixtures/
