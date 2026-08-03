@@ -26,11 +26,30 @@
   $: st = data.status;
   $: kg = data.kangaroo;
   $: matchN = data.matchSet.size;
+  $: matchLabel = data.matchSet.label;
+  $: matchProfile = data.matchSet.profile;
+  $: matchIncludesSatoshi = data.matchSet.includesSatoshi;
+  $: matchIncludesRichlist = data.matchSet.includesRichlist;
   $: snap = data.richlistSnapshot;
   $: snapAgeH = snap ? Math.round((Date.now() / 1000 - snap.createdAt) / 3600) : null;
   $: selectedJob = data.jobs.find((j) => j.id === selected) ?? null;
   $: method = selectedJob?.method ?? 'grind';
   $: isRunning = st.running || kg.running;
+  /** Sequential puzzle-range jobs support start-window + multi-host shards. */
+  $: isPuzzleRange =
+    method === 'grind' && !!selectedJob?.sourceId?.startsWith('puzzle-');
+  $: puzzleN =
+    isPuzzleRange && selectedJob?.sourceId
+      ? Number(selectedJob.sourceId.slice('puzzle-'.length))
+      : selectedJob?.puzzleN ?? null;
+  $: publicScanNote = puzzleN != null ? (data.publicScanNotes?.[puzzleN] ?? null) : null;
+
+  let startPct = '';
+  let startHex = '';
+  let endPct = '';
+  let endHex = '';
+  let shard = '';
+  let resume = true;
 
   // Pollard's kangaroo ETA at current rate.
   $: expectedOps = kg.halfBits === null ? null : Math.pow(2, kg.halfBits);
@@ -45,10 +64,17 @@
 <div class="head">
   <h1>Key Grinder</h1>
   <p class="muted">
-    Pick a target and Start. <b>Exposed puzzles</b> use Pollard's kangaroo (ECDLP);
-    everything else walks keys sequentially against
-    {bigCount(matchN)} watched targets ({bigCount(data.matchSet.hash160s)} hash160 · {data.matchSet.pubkeys}
-    P2PK pubkeys). Managed devices (local CPU, remote hosts) run either job kind when capable.
+    Two knobs: <b>where keys come from</b> (the job below) and <b>what counts as a hit</b>
+    (match-set: <b>{matchLabel}</b> — {bigCount(matchN)} targets).
+    There is no separate “find Satoshi’s keys” job — early coinbase keys are not known to live in a
+    small range you can exhaust. If the match-set includes coinbase/dormant, every sequential grind
+    (puzzle ranges, low-entropy, ColdCard, …) also checks those Satoshi-era scripts for free.
+  </p>
+  <p class="muted small">
+    Match-set: {bigCount(data.matchSet.hash160s)} hash160 · {data.matchSet.pubkeys} P2PK pubkeys ·
+    profile <span class="mono">{matchProfile}</span>
+    · <a href="/settings">Settings → Match-set</a>.
+    Exposed puzzles use kangaroo (single ECDLP target — match-set does not apply).
   </p>
   {#if snap}
     <p class="muted small">
@@ -69,10 +95,13 @@
 </div>
 
 <div class="honest">
-  <b>Honest math:</b> sequential ranges and weak-RNG sources are different from kangaroo.
-  Exposed puzzles with a known pubkey fall to ~2<sup>n/2</sup> ECDLP work on GPU/CPU solvers.
-  Sealed ranges and ColdCard walk keys or RNG states — the remote GPU's CUDA cores only help kangaroo;
-  its CPU can still join sequential grind when grind is enabled on that device.
+  <b>Honest math:</b> the job picks a <em>key source</em>; the match-set is a multi-target lottery on
+  every key you generate. Walking puzzle-71 still only produces keys in [2<sup>70</sup>, 2<sup>71</sup>) —
+  a Satoshi hit would mean that coin’s private key happens to be in that window (vanishingly unlikely).
+  Real weak-wallet EV is ColdCard / low-entropy sources against a richlist or coinbase match-set —
+  not “a dedicated Satoshi range.” Brainwallets and the digits of π/e/φ are not offered: those spaces
+  are tiny, public, and were swept to death years ago. Kangaroo is separate: ~2<sup>n/2</sup> ECDLP on
+  one exposed puzzle.
 </div>
 
 {#if form?.error}<div class="err">{form.error}</div>{/if}
@@ -96,7 +125,15 @@
         <div><span class="faint">pace</span><b class="num mono">{st.pace ?? '—'}</b></div>
         <div><span class="faint">backend</span><b class="num mono">{st.backend ?? '—'}</b></div>
         <div><span class="faint">hits</span><b class="num" class:btc={st.hits > 0}>{st.hits}</b></div>
+        {#if st.matchSetSize != null}
+          <div><span class="faint">match-set</span><b class="num">{bigCount(st.matchSetSize)}</b></div>
+        {/if}
       </div>
+      {#if st.matchLabel}
+        <p class="faint small rng-note">
+          Matching: <b class="mono">{st.matchProfile}</b> · {st.matchLabel}
+        </p>
+      {/if}
       {#if st.deviceIds?.length}
         <p class="faint small rng-note">
           Devices: <span class="mono">{st.deviceIds.join(', ')}</span>
@@ -172,10 +209,28 @@
       </form>
     {:else}
       <div class="v faint">Idle</div>
+      {#if st.lastRun}
+        <p class="last-run small" class:warn={st.lastRun.reason === 'error'}>
+          Last grind: <b class="mono">{st.lastRun.sourceName}</b>
+          {#if st.lastRun.reason === 'exhausted'}
+            — <b>space exhausted</b> in {duration(st.lastRun.elapsed)}
+          {:else if st.lastRun.reason === 'stopped'}
+            — stopped after {duration(st.lastRun.elapsed)}
+          {:else}
+            — <b>error</b>: {st.lastRun.error}
+          {/if}
+          · {bigCount(st.lastRun.keysTried)} keys checked
+          {#if st.lastRun.seedsTried != null}
+            · {bigCount(st.lastRun.seedsTried)} states
+          {/if}
+          · <b class:btc={st.lastRun.hits > 0}>{st.lastRun.hits}</b> hits
+        </p>
+      {/if}
       <p class="faint small rng-note">
         Pace: <b class="mono">{data.grind.pace}</b>
         · {data.grind.maxWorkers} workers
         · {data.grind.throttleMs}ms throttle
+        · match <b class="mono">{matchProfile}</b> ({matchLabel})
         · <a href="/settings">change</a>
       </p>
       <p class="faint small rng-note">
@@ -212,11 +267,105 @@
               {/if}
             {:else}
               <b>Sequential grind</b>
+              <span class="block-detail">
+                Each key is checked against match-set <b class="mono">{matchProfile}</b>
+                ({matchLabel}, {bigCount(matchN)} targets) — not only this job’s “name.”
+                {#if matchIncludesSatoshi}
+                  Includes <b>Satoshi-era</b> coinbase/dormant scripts (same free multi-target check as puzzles/richlist).
+                {:else}
+                  Satoshi-era coinbase is <em>not</em> in the current match-set —
+                  enable it under <a href="/settings">Settings → Match-set</a> if you want that lottery.
+                {/if}
+                {#if matchIncludesRichlist}
+                  · Richlist is included.
+                {/if}
+              </span>
             {/if}
             {#if selectedJob.detail}
               <span class="block-detail">{selectedJob.detail}</span>
             {/if}
           </p>
+        {/if}
+
+        {#if isPuzzleRange}
+          <fieldset class="range-window">
+            <legend class="faint">Range window (multi-machine farm)</legend>
+            <p class="faint small rng-note">
+              Claim a sub-range so hosts do not redo the same keys. Contiguous
+              <b>shard i/n</b> (e.g. <span class="mono">0/4</span> … <span class="mono">3/4</span>)
+              is the collider-style split. Optional start % / hex skips the bottom of the range.
+              Within one UI process, selected devices already split each batch; use shards when
+              each machine runs its own grind (separate app or rescue-runner).
+            </p>
+            {#if publicScanNote}
+              <p class="faint small rng-note scan-note">{publicScanNote}</p>
+            {/if}
+            <div class="range-grid">
+              <label>
+                <span class="faint">Start %</span>
+                <input
+                  name="startPct"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="any"
+                  placeholder="0"
+                  bind:value={startPct}
+                />
+              </label>
+              <label>
+                <span class="faint">End %</span>
+                <input
+                  name="endPct"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="any"
+                  placeholder="100"
+                  bind:value={endPct}
+                />
+              </label>
+              <label class="wide">
+                <span class="faint">Start key hex</span>
+                <input
+                  name="startHex"
+                  type="text"
+                  class="mono"
+                  placeholder="e.g. 4000… or leave blank"
+                  bind:value={startHex}
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="wide">
+                <span class="faint">End key hex (exclusive)</span>
+                <input
+                  name="endHex"
+                  type="text"
+                  class="mono"
+                  placeholder="blank = range hi"
+                  bind:value={endHex}
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label>
+                <span class="faint">Shard</span>
+                <input
+                  name="shard"
+                  type="text"
+                  class="mono"
+                  placeholder="0/4"
+                  bind:value={shard}
+                  autocomplete="off"
+                />
+              </label>
+              <label class="resume-lab">
+                <input type="checkbox" name="resume" value="1" bind:checked={resume} />
+                <span class="faint">Resume last cursor for this window</span>
+              </label>
+            </div>
+          </fieldset>
         {/if}
 
         {#if data.devices.length}
@@ -351,8 +500,6 @@
               ~2<sup>{j.halfBits}</sup>
             {:else if j.spaceKind === 'rng-states'}
               ~2<sup>{j.spaceBits.toFixed(1)}</sup> states
-            {:else if j.spaceKind === 'phrase-list' || j.spaceKind === 'digit-windows'}
-              ~2<sup>{j.spaceBits.toFixed(0)}</sup>
             {:else}
               2<sup>{j.spaceBits.toFixed(0)}</sup> keys
             {/if}
@@ -389,6 +536,48 @@
     display: block;
     margin-top: 4px;
     opacity: 0.9;
+  }
+  .range-window {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 0 0 12px;
+  }
+  .range-window legend {
+    padding: 0 4px;
+  }
+  .range-window .scan-note {
+    margin: 0 0 8px;
+    line-height: 1.4;
+  }
+  .range-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 12px;
+  }
+  .range-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+  }
+  .range-grid label.wide {
+    grid-column: 1 / -1;
+  }
+  .range-grid label.resume-lab {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    grid-column: 1 / -1;
+  }
+  .range-grid input[type='text'],
+  .range-grid input[type='number'] {
+    font-size: 13px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.25);
+    color: inherit;
   }
   .runner-list {
     list-style: none;
@@ -450,6 +639,14 @@
   }
   .rng-note {
     margin: 10px 0 0;
+    line-height: 1.4;
+  }
+  .last-run {
+    background: rgba(77, 244, 255, 0.06);
+    border: 1px solid rgba(77, 244, 255, 0.2);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 0 0 10px;
     line-height: 1.4;
   }
   .small {

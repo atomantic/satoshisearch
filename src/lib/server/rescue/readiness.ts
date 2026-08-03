@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { isVaultConfigured } from './vault';
 import { verifyAudit } from './audit';
-import { effectiveRescue, effectiveRuntime } from '../settings';
+import { effectiveRescue, effectiveRuntime, effectiveMatchSet } from '../settings';
 import { loadMatchSet, latestRichlistSnapshot } from '../grinder/loadset';
 import { nativeGrindAvailable } from '../grinder/native';
 import type { Bucket } from '../config';
@@ -32,6 +32,8 @@ export interface RescueReadiness {
   canDryRunSweep: boolean;
   checks: ReadinessCheck[];
   matchSetSize: number;
+  matchProfile: string;
+  matchLabel: string;
   richlistAgeHours: number | null;
   nativeGrind: boolean;
   primaryBucket: Bucket | string;
@@ -51,9 +53,10 @@ export function assessRescueReadiness(opts: ReadinessOptions = {}): RescueReadin
 
   const rescue = effectiveRescue();
   const runtime = effectiveRuntime();
+  const matchCfg = effectiveMatchSet();
   const vault = isVaultConfigured();
   const audit = verifyAudit();
-  const set = loadMatchSet();
+  const set = loadMatchSet(matchCfg.filter);
   const snap = latestRichlistSnapshot();
   const native = nativeGrindAvailable();
 
@@ -140,25 +143,34 @@ export function assessRescueReadiness(opts: ReadinessOptions = {}): RescueReadin
       id: 'match-set',
       level: 'fail',
       label: 'Match-set',
-      detail: 'Empty — grinder has nothing to match. Run richlist:refresh or richlist:from-utxo.'
+      detail: `Empty for profile "${matchCfg.profile}" (${matchCfg.label}). Index targets or broaden the match profile in Settings.`
     });
   } else {
     checks.push({
       id: 'match-set',
       level: 'ok',
       label: 'Match-set',
-      detail: `${set.size.toLocaleString()} targets (${set.hash160s.size} hash160 · ${set.pubkeys.size} pubkeys)`
+      detail: `${set.size.toLocaleString()} targets · ${matchCfg.label} (${set.hash160s.size} hash160 · ${set.pubkeys.size} pubkeys)`
     });
   }
 
   // --- richlist freshness ---
+  // Only warn about staleness when the active match profile actually includes richlist.
+  const matchIncludesRichlist = matchCfg.filter.datasets.includes('richlist');
   let richlistAgeHours: number | null = null;
-  if (!snap) {
+  if (!matchIncludesRichlist) {
+    checks.push({
+      id: 'richlist-age',
+      level: 'ok',
+      label: 'Richlist snapshot',
+      detail: `Not in match profile (${matchCfg.label}) — snapshot age not required for this grind`
+    });
+  } else if (!snap) {
     checks.push({
       id: 'richlist-age',
       level: 'warn',
       label: 'Richlist snapshot',
-      detail: 'No snapshot metadata — match-set may be stale or puzzle-only'
+      detail: 'No snapshot metadata — match-set may be stale or empty of richlist rows'
     });
   } else {
     richlistAgeHours = (Date.now() / 1000 - snap.created_at) / 3600;
@@ -263,6 +275,8 @@ export function assessRescueReadiness(opts: ReadinessOptions = {}): RescueReadin
     canDryRunSweep,
     checks,
     matchSetSize: set.size,
+    matchProfile: matchCfg.profile,
+    matchLabel: matchCfg.label,
     richlistAgeHours,
     nativeGrind: native,
     primaryBucket
@@ -276,7 +290,9 @@ export function formatReadiness(r: RescueReadiness): string {
   lines.push(
     `  grind=${r.canGrind ? 'OK' : 'NO'}  dry-run-sweep=${r.canDryRunSweep ? 'OK' : 'NO'}  live-sweep=${r.canLiveSweep ? 'OK' : 'NO'}`
   );
-  lines.push(`  match-set=${r.matchSetSize.toLocaleString()}  native=${r.nativeGrind}`);
+  lines.push(
+    `  match-set=${r.matchSetSize.toLocaleString()} (${r.matchProfile}: ${r.matchLabel})  native=${r.nativeGrind}`
+  );
   for (const c of r.checks) {
     const tag = c.level === 'ok' ? 'OK  ' : c.level === 'warn' ? 'WARN' : 'FAIL';
     lines.push(`  [${tag}] ${c.label}: ${c.detail}`);

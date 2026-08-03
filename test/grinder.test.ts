@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { hash160, bytesToHex } from '../src/lib/server/script.ts';
 import { emptyMatchSet, matchCandidate } from '../src/lib/server/grinder/matchset.ts';
-import { puzzleRangeSource, lowEntropySource, brainwalletSource } from '../src/lib/server/grinder/sources.ts';
+import { puzzleRangeSource, lowEntropySource } from '../src/lib/server/grinder/sources.ts';
 
 function privFromInt(n: bigint): Uint8Array {
   const out = new Uint8Array(32);
@@ -81,10 +81,3 @@ test('puzzle-range source yields keys inside [2^(n-1), 2^n)', () => {
   assert.equal(first, 128n);
 });
 
-test('brainwallet source hashes phrases to keys', () => {
-  const src = brainwalletSource(['correct horse battery staple', 'satoshi']);
-  const { items, done } = src.generate(0n, 10);
-  assert.equal(items.length, 2);
-  assert.ok(done);
-  assert.match(items[0].origin, /^brain:/);
-});

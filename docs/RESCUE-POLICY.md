@@ -23,7 +23,7 @@ Out of the box:
 | `puzzle` | Deliberately placed by the puzzle creator to be found. | **Auto-sweep eligible.** |
 | `coinbase` / `dormant` | Early miners, possibly Satoshi. Almost certainly not yours. | Held. |
 | `richlist` | Whoever controls a top-balance address. A living person. | Held. |
-| `brainwallet` / `constants` / `lowentropy` | Whoever chose a weak key. Usually a real, findable victim. | Held. |
+| `lowentropy` | Whoever chose a weak key. Usually a real, findable victim. | Held. |
 | `coldcard` | Victims of the 2026 ColdCard entropy flaw. | Held. |
 
 Puzzle addresses are the **only** class explicitly designed to be swept. Everything else may hold a

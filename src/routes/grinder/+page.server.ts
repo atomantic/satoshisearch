@@ -1,13 +1,19 @@
 import type { PageServerLoad, Actions } from './$types';
 import { fail } from '@sveltejs/kit';
-import { grinder } from '$server/grinder/engine';
+import { grinder, lastGrindCursor } from '$server/grinder/engine';
 import { kangaroo } from '$server/grinder/kangaroo-engine';
 import { makeSource, listSources } from '$server/grinder/registry';
 import { matchSetCounts, latestRichlistSnapshot } from '$server/grinder/loadset';
 import { listDevices } from '$server/grinder/devices';
-import { effectiveRescue, effectiveGrind } from '$server/settings';
+import { effectiveRescue, effectiveGrind, effectiveMatchSet } from '$server/settings';
 import { addressLink } from '$server/links';
 import { btcShort } from '$lib/format';
+import {
+  PUBLIC_SCAN_NOTES,
+  parseShardToken,
+  isWindowSpecified,
+  type WindowSpec
+} from '$server/grinder/range-window';
 
 /** Unified job id: `grind:<sourceId>` or `kangaroo:<n>`. */
 export type JobId = string;
@@ -57,6 +63,7 @@ export const load: PageServerLoad = async () => {
   const snap = latestRichlistSnapshot();
   const rescue = effectiveRescue();
   const grind = effectiveGrind();
+  const match = effectiveMatchSet();
   const kg = kangaroo.status;
   const st = grinder.status;
   const devices = listDevices();
@@ -78,13 +85,23 @@ export const load: PageServerLoad = async () => {
       sshHost: d.sshHost,
       capabilities: d.capabilities
     })),
-    matchSet: matchSetCounts(),
+    matchSet: {
+      ...matchSetCounts(match.filter),
+      profile: match.profile,
+      label: match.label,
+      /** Early coinbase / dormant — Satoshi-era watch targets in the match set. */
+      includesSatoshi:
+        match.filter.datasets.includes('coinbase') || match.filter.datasets.includes('dormant'),
+      includesRichlist: match.filter.datasets.includes('richlist')
+    },
     kangaroo: { ...kg, addressLink: kg.address ? addressLink(kg.address) : null },
     grind: {
       pace: grind.pace,
       maxWorkers: grind.maxWorkers,
       throttleMs: grind.throttleMs
     },
+    /** Public-scan guidance for range-start UI (not a coverage claim). */
+    publicScanNotes: PUBLIC_SCAN_NOTES,
     richlistSnapshot: snap
       ? {
           source: snap.source,
@@ -112,6 +129,33 @@ function formIds(data: FormData, field: string): string[] {
     .filter(Boolean);
 }
 
+function numOrNull(raw: FormDataEntryValue | null): number | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Range window fields from the grinder start form (puzzle sequential jobs). */
+function parseWindowFromForm(data: FormData): WindowSpec | null {
+  const startHex = String(data.get('startHex') ?? '').trim() || null;
+  const endHex = String(data.get('endHex') ?? '').trim() || null;
+  const startPct = numOrNull(data.get('startPct'));
+  const endPct = numOrNull(data.get('endPct'));
+  const shard = parseShardToken(String(data.get('shard') ?? ''));
+
+  const spec: WindowSpec = {
+    startHex,
+    endHex,
+    startPct,
+    endPct,
+    shardIndex: shard?.shardIndex ?? null,
+    shardCount: shard?.shardCount ?? null
+  };
+  return isWindowSpecified(spec) ? spec : null;
+}
+
 export const actions: Actions = {
   /** Unified start: job id selects grind vs kangaroo; devices apply to both. */
   start: async ({ request }) => {
@@ -133,12 +177,28 @@ export const actions: Actions = {
 
     // grind:… or bare source id for back-compat
     const sourceId = job.startsWith('grind:') ? job.slice('grind:'.length) : job;
-    const source = makeSource(sourceId);
+    const window = parseWindowFromForm(data);
+    let source;
+    try {
+      source = makeSource(sourceId, window);
+    } catch (e) {
+      return fail(400, { error: String(e) });
+    }
     if (!source) return fail(400, { error: `unknown or unavailable source: ${sourceId}` });
+
+    const resume = data.get('resume') === 'on' || data.get('resume') === '1';
+    const cursor = resume ? lastGrindCursor(source.name) : 0n;
+
     try {
       if (kangaroo.status.running) await kangaroo.stop();
-      await grinder.start(source, 0n, deviceIds.length ? deviceIds : undefined);
-      return { started: source.name, method: 'grind', devices: deviceIds };
+      await grinder.start(source, cursor, deviceIds.length ? deviceIds : undefined);
+      return {
+        started: source.name,
+        method: 'grind',
+        devices: deviceIds,
+        cursor: cursor.toString(),
+        window: window ?? null
+      };
     } catch (e) {
       return fail(400, { error: String(e) });
     }

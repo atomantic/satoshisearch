@@ -11,6 +11,17 @@ import { randomBytes } from 'node:crypto';
 import { availableParallelism } from 'node:os';
 import { join } from 'node:path';
 import { config, type Bucket } from './config';
+import {
+  MATCH_DATASETS,
+  type MatchDataset,
+  type MatchSetFilter,
+  normalizeMatchDatasets,
+  normalizePuzzleNs,
+  describeMatchSetFilter
+} from './grinder/loadset';
+
+/** Named presets for which indexed targets sequential grind matches against. */
+export type MatchProfileId = 'all' | 'satoshi' | 'puzzles' | 'richlist' | 'custom';
 
 export interface AppSettings {
   bitcoinRpc: {
@@ -61,6 +72,17 @@ export interface AppSettings {
      * (light defaults to 150ms; normal/full 0).
      */
     throttleMs: number | null;
+  };
+  /**
+   * Which indexed targets sequential grind matches against.
+   * Kangaroo ignores this (single ECDLP target). Takes effect on next grind start.
+   */
+  matchSet: {
+    profile: MatchProfileId;
+    /** Used when profile is `custom` (and optional puzzle N filter for `puzzles`/`custom`). */
+    datasets: MatchDataset[];
+    /** Restrict puzzle targets to these N; empty = all puzzles when puzzle dataset is on. */
+    puzzleNs: number[];
   };
   richlist: {
     /** null = unset, falls through to RICHLIST_MIN_SATS. */
@@ -158,6 +180,7 @@ const DEFAULTS: AppSettings = {
   rescue: { destAddress: '', dryRun: null, dustSats: null, autoBuckets: null, whitehatAttested: null },
   runtime: { mempoolApiUrl: '', concurrency: null, coinbaseMaxHeight: null },
   grind: { pace: 'normal', maxWorkers: null, throttleMs: null },
+  matchSet: { profile: 'all', datasets: [...MATCH_DATASETS], puzzleNs: [] },
   richlist: { minSats: null, scriptPolicy: '', loyceUrl: '' },
   kangaroo: {
     runners: [],
@@ -180,6 +203,13 @@ const DEFAULTS: AppSettings = {
 function normalizePace(v: unknown): GrindPace {
   if (v === 'light' || v === 'normal' || v === 'full') return v;
   return 'normal';
+}
+
+export function normalizeMatchProfile(v: unknown): MatchProfileId {
+  if (v === 'all' || v === 'satoshi' || v === 'puzzles' || v === 'richlist' || v === 'custom') {
+    return v;
+  }
+  return 'all';
 }
 
 export function normalizeKangarooBackend(v: unknown): KangarooBackend | '' {
@@ -292,9 +322,11 @@ function normalize(raw: Partial<AppSettings> | null | undefined): AppSettings {
   const r: Partial<AppSettings['rescue']> = raw?.rescue ?? {};
   const rt: Partial<AppSettings['runtime']> = raw?.runtime ?? {};
   const g: Partial<AppSettings['grind']> = raw?.grind ?? {};
+  const ms: Partial<AppSettings['matchSet']> = raw?.matchSet ?? {};
   const rl: Partial<AppSettings['richlist']> = raw?.richlist ?? {};
   const kg: Partial<AppSettings['kangaroo']> = raw?.kangaroo ?? {};
   const port = Number(f.port);
+  const customDatasets = normalizeMatchDatasets(ms.datasets);
   return {
     bitcoinRpc: {
       url: String(b.url ?? '').trim().replace(/\/+$/, ''),
@@ -324,6 +356,11 @@ function normalize(raw: Partial<AppSettings> | null | undefined): AppSettings {
       pace: normalizePace(g.pace),
       maxWorkers: numOrNull(g.maxWorkers),
       throttleMs: numOrNull(g.throttleMs)
+    },
+    matchSet: {
+      profile: normalizeMatchProfile(ms.profile),
+      datasets: customDatasets.length ? customDatasets : [...MATCH_DATASETS],
+      puzzleNs: normalizePuzzleNs(ms.puzzleNs)
     },
     richlist: {
       minSats: numOrNull(rl.minSats),
@@ -418,6 +455,7 @@ export function updateSettings(
     rescue?: Partial<AppSettings['rescue']>;
     runtime?: Partial<AppSettings['runtime']>;
     grind?: Partial<AppSettings['grind']>;
+    matchSet?: Partial<AppSettings['matchSet']>;
     richlist?: Partial<AppSettings['richlist']>;
     kangaroo?: Partial<AppSettings['kangaroo']>;
   },
@@ -432,6 +470,7 @@ export function updateSettings(
   const rescue = { ...cur.rescue, ...patch.rescue };
   const runtime = { ...cur.runtime, ...patch.runtime };
   const grind = { ...cur.grind, ...patch.grind };
+  const matchSet = { ...cur.matchSet, ...patch.matchSet };
   const richlist = { ...cur.richlist, ...patch.richlist };
   const kangaroo = { ...cur.kangaroo, ...patch.kangaroo };
   return saveSettings({
@@ -441,6 +480,7 @@ export function updateSettings(
     rescue,
     runtime,
     grind,
+    matchSet,
     richlist,
     kangaroo,
     updatedAt: null
@@ -565,6 +605,109 @@ export function effectiveRuntime(): {
   const fromSettings = !!(s.mempoolApiUrl || s.concurrency !== null || s.coinbaseMaxHeight !== null);
   const source: SettingsSource = fromSettings ? 'settings' : 'env';
   return { mempoolApiUrl, concurrency, coinbaseMaxHeight, source };
+}
+
+/**
+ * Resolved match-set filter for the next sequential grind start.
+ * Env: MATCH_SET_PROFILE=all|satoshi|puzzles|richlist|custom
+ *      MATCH_SET_DATASETS=coinbase,dormant,puzzle (custom)
+ *      MATCH_SET_PUZZLES=71,72,140 (optional N filter when puzzles included)
+ */
+export function effectiveMatchSet(): {
+  profile: MatchProfileId;
+  filter: MatchSetFilter;
+  label: string;
+  source: SettingsSource;
+} {
+  const s = loadSettings().matchSet;
+  const envProfile = normalizeMatchProfile(process.env.MATCH_SET_PROFILE);
+  const envHasProfile =
+    process.env.MATCH_SET_PROFILE !== undefined && process.env.MATCH_SET_PROFILE !== '';
+  const profile: MatchProfileId = envHasProfile ? envProfile : s.profile;
+
+  const envDatasets = normalizeMatchDatasets(
+    (process.env.MATCH_SET_DATASETS ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean)
+  );
+  const envPuzzles = normalizePuzzleNs(
+    (process.env.MATCH_SET_PUZZLES ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean)
+  );
+
+  let datasets: MatchDataset[];
+  switch (profile) {
+    case 'satoshi':
+      datasets = ['coinbase', 'dormant'];
+      break;
+    case 'puzzles':
+      datasets = ['puzzle'];
+      break;
+    case 'richlist':
+      datasets = ['richlist'];
+      break;
+    case 'custom':
+      datasets = envDatasets.length
+        ? envDatasets
+        : s.datasets.length
+          ? s.datasets
+          : [...MATCH_DATASETS];
+      break;
+    case 'all':
+    default:
+      datasets = [...MATCH_DATASETS];
+      break;
+  }
+
+  // Puzzle N filter: env wins; else stored for puzzles/custom; ignored for all/satoshi/richlist.
+  let puzzleNs: number[] = [];
+  if (datasets.includes('puzzle')) {
+    if (envPuzzles.length) {
+      puzzleNs = envPuzzles;
+    } else if (profile === 'puzzles' || profile === 'custom') {
+      puzzleNs = s.puzzleNs;
+    }
+  }
+
+  // If custom/puzzles specify N without puzzle dataset, include puzzle.
+  if (puzzleNs.length && !datasets.includes('puzzle')) {
+    datasets = [...datasets, 'puzzle'];
+  }
+
+  // Every switch arm above assigns a non-empty list, so `filter` is never empty.
+  const filter: MatchSetFilter = { datasets, puzzleNs };
+
+  const fromEnv = !!(
+    process.env.MATCH_SET_PROFILE ||
+    process.env.MATCH_SET_DATASETS ||
+    process.env.MATCH_SET_PUZZLES
+  );
+  const fromSettings = s.profile !== 'all' || s.puzzleNs.length > 0;
+
+  const label =
+    profile === 'all' && !puzzleNs.length
+      ? 'all indexed'
+      : profile === 'custom'
+        ? `custom (${describeMatchSetFilter(filter)})`
+        : profile === 'satoshi'
+          ? 'satoshi-era (coinbase + dormant)'
+          : profile === 'richlist'
+            ? 'richlist'
+            : profile === 'puzzles'
+              ? puzzleNs.length
+                ? `puzzles #${puzzleNs.join(',#')}`
+                : 'puzzles (all)'
+              : describeMatchSetFilter(filter);
+
+  return {
+    profile,
+    filter,
+    label,
+    source: pickSource(fromSettings, fromEnv)
+  };
 }
 
 /**

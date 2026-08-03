@@ -94,6 +94,17 @@ npm run index:richlist -- --replace datasets/balances-latest.tsv.gz --source loy
 On a hit, snapshot balance is audited and live Esplora is preferred for truth.
 See `plans/richlist-refresh.md` and `datasets/PROVENANCE.md`.
 
+**Match-set profile** (Settings → Match-set): sequential grind can match against
+all indexed targets (default), Satoshi-era only (`coinbase`+`dormant`), puzzles
+only, richlist only, or a custom mix (optional puzzle N filter). Kangaroo still
+targets a single exposed puzzle pubkey. Env overrides:
+`MATCH_SET_PROFILE`, `MATCH_SET_DATASETS`, `MATCH_SET_PUZZLES`.
+
+**Multi-machine range farm** (Grinder → puzzle range, or rescue-runner): claim a
+contiguous **shard** (`0/4` … `3/4`) and optional start %/hex so hosts do not
+overlap. Public puzzle-71 pools are ~1% class coverage — not “halfway”; check a
+live dashboard before skipping. See `docs/KEYSPACE.md`.
+
 ## Access over Tailscale
 
 The app binds to all interfaces, so it's reachable at your machine's MagicDNS name on port 3117.

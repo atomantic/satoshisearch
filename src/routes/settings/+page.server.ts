@@ -19,8 +19,10 @@ import {
   effectiveRuntime,
   effectiveRichlist,
   effectiveGrind,
+  effectiveMatchSet,
   effectiveKangaroo,
   normalizeKangarooMode,
+  normalizeMatchProfile,
   DEFAULT_KANGAROO_SSH_WRAPPER,
   DEFAULT_KANGAROO_REMOTE_BIN,
   DEFAULT_REMOTE_GRIND_BIN,
@@ -28,6 +30,12 @@ import {
   generateVaultKey,
   type KangarooRunnerConfig
 } from '$server/settings';
+import {
+  MATCH_DATASETS,
+  matchSetCounts,
+  normalizeMatchDatasets,
+  normalizePuzzleNs
+} from '$server/grinder/loadset';
 import { kangarooAvailability } from '$server/grinder/kangaroo-backends';
 import {
   listDevices,
@@ -74,9 +82,11 @@ export const load: PageServerLoad = async () => {
   const rescue = effectiveRescue();
   const runtime = effectiveRuntime();
   const grind = effectiveGrind();
+  const matchSet = effectiveMatchSet();
   const kangaroo = effectiveKangaroo();
   const kangarooAvail = kangarooAvailability();
   const richlist = effectiveRichlist();
+  const matchCounts = matchSetCounts(matchSet.filter);
 
   return {
     node,
@@ -107,6 +117,16 @@ export const load: PageServerLoad = async () => {
       source: grind.source,
       /** Raw overrides as stored (null = use pace default). */
       stored: loadSettings().grind
+    },
+    matchSet: {
+      profile: matchSet.profile,
+      label: matchSet.label,
+      datasets: matchSet.filter.datasets,
+      puzzleNs: matchSet.filter.puzzleNs,
+      source: matchSet.source,
+      counts: matchCounts,
+      allDatasets: [...MATCH_DATASETS],
+      stored: loadSettings().matchSet
     },
     kangaroo: {
       mode: kangaroo.mode,
@@ -326,6 +346,52 @@ export const actions: Actions = {
     audit('settings-grind-saved', { pace, maxWorkers, throttleMs });
     return {
       done: `Saved grinder pace: ${pace}${maxWorkers ? ` · max ${maxWorkers} workers` : ''}${throttleMs != null ? ` · ${throttleMs}ms throttle` : ''}. Takes effect on the next grind start.`
+    };
+  },
+
+  saveMatchSet: async ({ request }) => {
+    const data = await request.formData();
+    const profile = normalizeMatchProfile(String(data.get('profile') ?? 'all').trim());
+    const datasets = normalizeMatchDatasets(data.getAll('datasets').map((v) => String(v)));
+    const puzzleRaw = String(data.get('puzzleNs') ?? '').trim();
+    const puzzleTokens = puzzleRaw ? puzzleRaw.split(/[\s,]+/).filter(Boolean) : [];
+    const puzzleNs = normalizePuzzleNs(puzzleTokens);
+
+    if (profile === 'custom' && datasets.length === 0) {
+      return fail(400, {
+        error: 'Custom match profile needs at least one dataset (coinbase, dormant, puzzle, richlist).'
+      });
+    }
+    // Check the raw tokens: normalizePuzzleNs already dropped anything out of
+    // range, so testing its output could never fail and bad input would be
+    // silently discarded under a success message.
+    if (
+      puzzleTokens.some((t) => {
+        const n = Number(t);
+        return !Number.isInteger(n) || n < 1 || n > 256;
+      })
+    ) {
+      return fail(400, { error: 'Puzzle numbers must be integers from 1 to 256.' });
+    }
+
+    updateSettings({
+      matchSet: {
+        profile,
+        datasets: profile === 'custom' ? datasets : loadSettings().matchSet.datasets,
+        puzzleNs: profile === 'puzzles' || profile === 'custom' ? puzzleNs : []
+      }
+    });
+
+    const eff = effectiveMatchSet();
+    const counts = matchSetCounts(eff.filter);
+    audit('settings-matchset-saved', {
+      profile: eff.profile,
+      datasets: eff.filter.datasets,
+      puzzleNs: eff.filter.puzzleNs,
+      size: counts.size
+    });
+    return {
+      done: `Saved match-set: ${eff.label} · ${counts.size.toLocaleString()} targets. Takes effect on the next grind start.`
     };
   },
 

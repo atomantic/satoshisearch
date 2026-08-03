@@ -81,6 +81,18 @@
   let grindThrottleMs =
     data.grind.stored.throttleMs != null ? String(data.grind.stored.throttleMs) : '';
 
+  // Match-set profile (sequential grind targets)
+  let matchProfile = data.matchSet.profile;
+  let matchDatasets = [...data.matchSet.stored.datasets];
+  let matchPuzzleNs =
+    data.matchSet.stored.puzzleNs.length > 0
+      ? data.matchSet.stored.puzzleNs.join(', ')
+      : data.matchSet.puzzleNs.length
+        ? data.matchSet.puzzleNs.join(', ')
+        : '';
+  $: showMatchCustom = matchProfile === 'custom';
+  $: showMatchPuzzles = matchProfile === 'puzzles' || matchProfile === 'custom';
+
   // Compute device editor (kangaroo + optional sequential grind)
   let editId = '';
   let editName = '';
@@ -559,6 +571,96 @@
     </div>
     <div class="actions">
       <button type="submit" disabled={!!busy}>{busy === 'save-grind' ? 'Saving…' : 'Save grinder pace'}</button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="k">Match-set (grind targets)</div>
+  <p class="faint small top-note">
+    Which indexed scripts sequential grind treats as a hit. Every generated key is checked against
+    this set (EC work dominates — a larger set barely costs anything). Kangaroo ignores this and uses
+    its single puzzle pubkey. Source: <b>{data.matchSet.source}</b> · effective:
+    <b>{data.matchSet.label}</b> ·
+    <b>{data.matchSet.counts.size.toLocaleString()}</b> targets
+    ({data.matchSet.counts.hash160s.toLocaleString()} hash160 ·
+    {data.matchSet.counts.pubkeys.toLocaleString()} pubkeys).
+    Takes effect on the <em>next</em> grind start.
+  </p>
+  <form method="POST" action="?/saveMatchSet" class="rpc-form" use:enhance={track('save-matchset')}>
+    <fieldset class="pace-set">
+      <legend>Profile</legend>
+      <label class="pace-item">
+        <input type="radio" name="profile" value="all" bind:group={matchProfile} />
+        <span>
+          <b>All indexed</b>
+          <em class="faint">— coinbase + dormant + puzzles + richlist (historical default).</em>
+        </span>
+      </label>
+      <label class="pace-item">
+        <input type="radio" name="profile" value="satoshi" bind:group={matchProfile} />
+        <span>
+          <b>Satoshi-era</b>
+          <em class="faint">— coinbase + dormant only (early P2PK / P2PKH watch).</em>
+        </span>
+      </label>
+      <label class="pace-item">
+        <input type="radio" name="profile" value="puzzles" bind:group={matchProfile} />
+        <span>
+          <b>Puzzles</b>
+          <em class="faint">— puzzle outputs only; optional N filter below.</em>
+        </span>
+      </label>
+      <label class="pace-item">
+        <input type="radio" name="profile" value="richlist" bind:group={matchProfile} />
+        <span>
+          <b>Richlist</b>
+          <em class="faint">— ≥min-BTC single-key richlist only (rescue race).</em>
+        </span>
+      </label>
+      <label class="pace-item">
+        <input type="radio" name="profile" value="custom" bind:group={matchProfile} />
+        <span>
+          <b>Custom</b>
+          <em class="faint">— pick datasets and optional puzzle numbers.</em>
+        </span>
+      </label>
+    </fieldset>
+
+    {#if showMatchCustom}
+      <fieldset class="pace-set">
+        <legend>Datasets</legend>
+        {#each data.matchSet.allDatasets as ds}
+          <label class="pace-item">
+            <input type="checkbox" name="datasets" value={ds} bind:group={matchDatasets} />
+            <span><b class="mono">{ds}</b></span>
+          </label>
+        {/each}
+      </fieldset>
+    {/if}
+
+    {#if showMatchPuzzles}
+      <div class="rpc-grid">
+        <label class="full">
+          <span>
+            Puzzle numbers
+            <em class="faint">(optional; blank = all puzzles. e.g. 71, 72, 140)</em>
+          </span>
+          <input
+            name="puzzleNs"
+            type="text"
+            placeholder="all puzzles"
+            bind:value={matchPuzzleNs}
+            autocomplete="off"
+          />
+        </label>
+      </div>
+    {/if}
+
+    <div class="actions">
+      <button type="submit" disabled={!!busy}
+        >{busy === 'save-matchset' ? 'Saving…' : 'Save match-set'}</button
+      >
     </div>
   </form>
 </div>

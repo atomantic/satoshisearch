@@ -9,7 +9,7 @@ SQLite under `data/` after indexing.
 | `balances-latest.tsv.gz` | varies | Local fetch via `npm run richlist:fetch` from [addresses.loyce.club](http://addresses.loyce.club/) (Blockchair-derived daily dump), filtered to **single-key** scripts (P2PKH + P2WPKH) above `RICHLIST_MIN_SATS` (default 1 BTC). **Not committed** (see `.gitignore`). | Primary richlist match-set + snapshot balances. |
 | `fixtures/richlist-sample.tsv` | 2 | Hand-built test fixture (genesis P2PKH + BIP-173 P2WPKH). | Unit/manual import smoke tests. |
 | `dormant-coinbase.txt.gz` | 22,274 | `satoshifinder/data/dormant.txt` — early coinbase addresses that held an untouched 50 BTC as of 2021 (address + sats). | Reference/fallback only. The authoritative Satoshi-era set is rebuilt from the chain by `index:coinbase` (P2PK-correct). |
-| `phrases/*.txt` | ~160 | `bitfinderlite/data/*.txt` — brainwallet phrase lists. | Seed material for the grinder's `brainwallet` source (SHA256 of each phrase → candidate key). |
+| `phrases/*.txt` | ~160 | `bitfinderlite/data/*.txt` — brainwallet phrase lists. | **Unused.** The `brainwallet` grind source was retired — the class is small, public, and long since swept. Kept only as reference; nothing reads these files. |
 
 ## Refreshing the richlist
 

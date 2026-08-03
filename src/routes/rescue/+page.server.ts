@@ -57,6 +57,8 @@ export const load: PageServerLoad = async () => {
       canDryRunSweep: readiness.canDryRunSweep,
       canLiveSweep: readiness.canLiveSweep,
       matchSetSize: readiness.matchSetSize,
+      matchProfile: readiness.matchProfile,
+      matchLabel: readiness.matchLabel,
       richlistAgeHours: readiness.richlistAgeHours,
       nativeGrind: readiness.nativeGrind,
       primaryBucket: readiness.primaryBucket,

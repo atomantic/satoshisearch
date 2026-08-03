@@ -125,7 +125,7 @@ async function decide(
  * script to the rescue destination.
  *
  * Supports P2PKH and P2WPKH inputs — which covers every realistic rescue class
- * (all 256 puzzles are P2PKH; richlist/brainwallet/coldcard are P2PKH or segwit).
+ * (all 256 puzzles are P2PKH; richlist/coldcard/lowentropy are P2PKH or segwit).
  * **P2PK is intentionally not auto-swept**: @scure/btc-signer refuses bare P2PK,
  * and P2PK here means Satoshi-era coinbase coins, which must never be moved
  * automatically. Those hits are held with the key in the vault for manual review.

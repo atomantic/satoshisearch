@@ -8,7 +8,7 @@
  */
 import { openDb, nowSec } from '../db';
 import type { Bucket } from '../config';
-import { mayAutoSweep, effectiveGrind, type GrindPace } from '../settings';
+import { mayAutoSweep, effectiveGrind, effectiveMatchSet, type GrindPace, type MatchProfileId } from '../settings';
 import { GrinderPool, coldcardWorkerCfg } from './pool';
 import { loadMatchSet, findTargetByMatch } from './loadset';
 import { recordHit } from './hit';
@@ -18,6 +18,26 @@ import type { GrindSource, SpaceKind } from './sources';
 import type { Match } from './matchset';
 import { generateColdcardSeeds, type RngSpaceModel } from './coldcard';
 import { pickDevices, type ResolvedDevice } from './devices';
+
+/**
+ * What the last grind did, kept after it stops. Small spaces (lowentropy, the
+ * ColdCard demo slices) can exhaust in seconds — without this the UI drops
+ * straight back to Idle and Start looks like it did nothing.
+ */
+export interface GrindRunSummary {
+  sourceName: string;
+  /** exhausted = walked the whole space; stopped = user stop; error = threw. */
+  reason: 'exhausted' | 'stopped' | 'error';
+  keysTried: number;
+  seedsTried: number | null;
+  hits: number;
+  /** Total work units in the space, when known. */
+  spaceSize: string | null;
+  /** Seconds the run lasted. */
+  elapsed: number;
+  finishedAt: number;
+  error: string | null;
+}
 
 export interface GrinderStatus {
   running: boolean;
@@ -53,6 +73,14 @@ export interface GrinderStatus {
   throttleMs: number | null;
   /** Device ids participating in the current grind. */
   deviceIds: string[];
+  /** Match-set profile active for this run (sequential grind only). */
+  matchProfile: MatchProfileId | null;
+  /** Human label for the active match filter. */
+  matchLabel: string | null;
+  /** Size of the match-set loaded for this run. */
+  matchSetSize: number | null;
+  /** Summary of the previous run, so a fast finish is visible. */
+  lastRun: GrindRunSummary | null;
 }
 
 /** JS noble path is allocation-heavy; smaller batches keep latency low. */
@@ -64,6 +92,26 @@ export const BATCH_RANGE = 65536;
 /** Coldcard: seeds per job (each seed expands to many HD keys via PBKDF2). */
 /** Coldcard: seeds per job (native OpenSSL PBKDF2 — larger batches OK). */
 export const BATCH_COLDCARD_SEEDS = 32;
+
+/**
+ * Last persisted cursor for a source name, or 0n if there is none.
+ *
+ * The engine is the only writer of `grind_source` (see start/loop below), so
+ * it also owns how a stored cursor is read back — including the "garbage or
+ * missing means start over" rule. Both resume paths (the grinder start action
+ * and `rescue-runner --resume`) go through here rather than re-deriving it.
+ */
+export function lastGrindCursor(sourceName: string): bigint {
+  try {
+    const row = openDb()
+      .prepare(`SELECT cursor FROM grind_source WHERE name=?`)
+      .get(sourceName) as { cursor: string } | undefined;
+    if (row?.cursor) return BigInt(row.cursor);
+  } catch {
+    /* unreadable cursor — fall through to a fresh start */
+  }
+  return 0n;
+}
 
 class GrinderEngine {
   private pool: GrinderPool | null = null;
@@ -82,6 +130,10 @@ class GrinderEngine {
   private pace: GrindPace | null = null;
   private throttleMs = 0;
   private deviceIds: string[] = [];
+  /** Resolved match-set for the current run; the three parts always move together. */
+  private match: ReturnType<typeof effectiveMatchSet> | null = null;
+  private matchSetSize: number | null = null;
+  private lastRun: GrindRunSummary | null = null;
 
   get status(): GrinderStatus {
     const kind = this.source?.spaceKind ?? null;
@@ -104,7 +156,26 @@ class GrinderEngine {
       rngSpace: this.rngSpace,
       pace: this.running ? this.pace : null,
       throttleMs: this.running ? this.throttleMs : null,
-      deviceIds: this.running ? [...this.deviceIds] : []
+      deviceIds: this.running ? [...this.deviceIds] : [],
+      matchProfile: this.running ? (this.match?.profile ?? null) : null,
+      matchLabel: this.running ? (this.match?.label ?? null) : null,
+      matchSetSize: this.running ? this.matchSetSize : null,
+      lastRun: this.lastRun
+    };
+  }
+
+  /** Freeze what this run accomplished so the idle UI can report it. */
+  private finish(source: GrindSource, reason: GrindRunSummary['reason'], error?: unknown): void {
+    this.lastRun = {
+      sourceName: source.name,
+      reason,
+      keysTried: this.keysTried,
+      seedsTried: source.spaceKind === 'rng-states' ? this.seedsTried : null,
+      hits: this.hits,
+      spaceSize: source.size != null ? source.size.toString() : null,
+      elapsed: this.startedAt != null ? Math.max(0, nowSec() - this.startedAt) : 0,
+      finishedAt: nowSec(),
+      error: error === undefined ? null : String(error)
     };
   }
 
@@ -122,6 +193,7 @@ class GrinderEngine {
     this.seedsTried = 0;
     this.cursor = resumeCursor;
     this.hits = 0;
+    this.lastRun = null;
     this.startedAt = nowSec();
     this.lastRateSample = { t: Date.now(), keys: 0, seeds: 0 };
     this.keysPerSec = 0;
@@ -132,11 +204,22 @@ class GrinderEngine {
     this.pace = grind.pace;
     this.throttleMs = grind.throttleMs;
 
+    const match = effectiveMatchSet();
+    this.match = match;
+
     // Coldcard expand is local-only (PBKDF2); still accept device list but remotes
     // are ignored by the pool for coldcard jobs.
     const devices: ResolvedDevice[] = pickDevices('grind', deviceIds);
 
-    const set = loadMatchSet();
+    const set = loadMatchSet(match.filter);
+    this.matchSetSize = set.size;
+    if (set.size === 0) {
+      this.running = false;
+      throw new Error(
+        `match-set is empty for profile "${match.profile}" (${match.label}). ` +
+          'Index targets or pick a broader match profile in Settings.'
+      );
+    }
     this.pool = new GrinderPool();
     await this.pool.start(set, devices.length ? devices : undefined);
     this.deviceIds = this.pool.activeDeviceIds;
@@ -145,6 +228,10 @@ class GrinderEngine {
       source: source.name,
       bucket: source.bucket,
       matchSetSize: set.size,
+      matchProfile: match.profile,
+      matchLabel: match.label,
+      matchDatasets: match.filter.datasets,
+      matchPuzzleNs: match.filter.puzzleNs,
       workers: this.pool.workerCount,
       backend: this.pool.backendName,
       devices: this.deviceIds,
@@ -154,6 +241,8 @@ class GrinderEngine {
       spaceKind: source.spaceKind ?? 'sequential-keys',
       spaceSize: source.size?.toString() ?? null,
       spaceBits: source.spaceBits,
+      spaceUnit: source.spaceUnit ?? null,
+      resumeCursor: resumeCursor.toString(),
       rngSpace: this.rngSpace
         ? {
             seedStates: this.rngSpace.seedStates.toString(),
@@ -174,6 +263,7 @@ class GrinderEngine {
 
     this.loop(source, resumeCursor).catch((err) => {
       audit('grind-error', { source: source.name, error: String(err) });
+      this.finish(source, 'error', err);
       this.running = false;
     });
   }
@@ -274,9 +364,12 @@ class GrinderEngine {
       if (done) break;
     }
     await Promise.all(inflight);
+    const reason = this.stopRequested ? 'stopped' : 'exhausted';
+    this.finish(source, reason);
     this.running = false;
     audit('grind-stop', {
       source: source.name,
+      reason,
       keysTried: this.keysTried,
       seedsTried: this.seedsTried || undefined,
       hits: this.hits
@@ -329,7 +422,7 @@ class GrinderEngine {
         matched: m.matched,
         privHex: m.privHex
       },
-      findTargetByMatch(m.matched, m.kind)
+      findTargetByMatch(m.matched, m.kind, this.match?.filter ?? null)
     );
   }
 

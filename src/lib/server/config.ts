@@ -134,8 +134,6 @@ export const BUCKETS = [
   'dormant',
   'richlist',
   'coldcard',
-  'brainwallet',
-  'constants',
   'lowentropy'
 ] as const;
 

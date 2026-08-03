@@ -8,14 +8,14 @@
  * succeeds — 2^72 alone is ~10^8 years at 10^6 keys/s — so value comes only from
  * sources whose *effective* space is small (weak-key classes), plus monitoring.
  */
-import { sha256 } from '@noble/hashes/sha256';
 import type { Bucket } from '../config';
 import type { ColdcardConfig, RngSpaceModel } from './coldcard';
+import { CURVE_N, puzzleBounds } from './range-window';
 
 export interface KeyCandidate {
   /** 32-byte big-endian private key. */
   priv: Uint8Array;
-  /** Human-readable provenance for audit/claim records (e.g. the phrase, the index). */
+  /** Human-readable provenance for audit/claim records (e.g. the key index). */
   origin: string;
 }
 
@@ -37,9 +37,8 @@ export interface RangeBatch {
  * What `size` / `spaceBits` measure for this source.
  * - sequential-keys: cursor walks private-key integers (puzzle, lowentropy)
  * - rng-states: cursor walks weak-RNG initial states; keys are derived and scattered
- * - phrase-list / digit-windows: finite list/window enumeration
  */
-export type SpaceKind = 'sequential-keys' | 'rng-states' | 'phrase-list' | 'digit-windows';
+export type SpaceKind = 'sequential-keys' | 'rng-states';
 
 export interface GrindSource {
   name: string;
@@ -75,8 +74,6 @@ export interface GrindSource {
   rngSpace?: RngSpaceModel;
 }
 
-const CURVE_N = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cc8502f15');
-
 export function bigToPriv(n: bigint): Uint8Array {
   const out = new Uint8Array(32);
   let v = n;
@@ -105,21 +102,40 @@ function inRange(n: bigint): boolean {
 }
 
 /**
- * puzzle-range: sequentially enumerate [2^(n-1), 2^n) for a target puzzle. This
- * is a genuine 2^(n-1)-wide space — infeasible to exhaust for n>=71, but exposed
- * so the UI can show progress and target the frontier (71/72).
+ * puzzle-range: sequentially enumerate a window inside [2^(n-1), 2^n).
+ * Default window is the full puzzle range. Pass `window` to claim a sub-range
+ * (start offset + multi-machine shard) — see range-window.ts.
+ *
+ * Full 2^(n-1) spaces are infeasible to exhaust for n≥71; the source exists so
+ * the UI can show progress, farm shards across hosts, and multi-match free lottery.
  */
-export function puzzleRangeSource(n: number): GrindSource {
-  const lo = 1n << BigInt(n - 1);
-  const hi = 1n << BigInt(n);
+export function puzzleRangeSource(
+  n: number,
+  window?: { start: bigint; end: bigint; label?: string }
+): GrindSource {
+  const { lo: fullLo, hi: fullHi } = puzzleBounds(n);
+  const lo = window?.start ?? fullLo;
+  const hi = window?.end ?? fullHi;
+  if (hi <= lo) throw new Error(`puzzle-range-${n}: empty window`);
+  if (lo < fullLo || hi > fullHi) {
+    throw new Error(`puzzle-range-${n}: window outside [2^${n - 1}, 2^${n})`);
+  }
+  const size = hi - lo;
   const prefix = `puzzle${n}`;
+  const winLabel = window?.label?.trim() || '';
+  const name = winLabel ? `puzzle-range-${n}:${winLabel}` : `puzzle-range-${n}`;
+  // Effective work bits for the claimed window (not always n-1).
+  const spaceBits = size > 0n ? Number(size.toString(2).length - 1) : 0;
   return {
-    name: `puzzle-range-${n}`,
+    name,
     bucket: 'puzzle',
-    spaceBits: n - 1,
-    size: hi - lo,
+    spaceBits: Math.max(0, spaceBits),
+    size,
     spaceKind: 'sequential-keys',
-    spaceUnit: `keys in [2^${n - 1}, 2^${n})`,
+    spaceUnit:
+      lo === fullLo && hi === fullHi
+        ? `keys in [2^${n - 1}, 2^${n})`
+        : `keys in [0x${lo.toString(16)}, 0x${hi.toString(16)})`,
     generate(cursor, limit) {
       const start = lo + cursor;
       const items: KeyCandidate[] = [];
@@ -139,62 +155,6 @@ export function puzzleRangeSource(n: number): GrindSource {
         nextCursor: cursor + BigInt(count),
         done: start + BigInt(count) >= hi
       };
-    }
-  };
-}
-
-/**
- * brainwallet: SHA256 of each passphrase is the private key (the classic
- * brainwallet construction). The genuinely realistic rescue class — real people
- * lost real coins this way. Cursor indexes into the phrase list.
- */
-export function brainwalletSource(phrases: string[]): GrindSource {
-  return {
-    name: 'brainwallet',
-    bucket: 'brainwallet',
-    spaceBits: Math.log2(Math.max(phrases.length, 1)),
-    size: BigInt(phrases.length),
-    spaceKind: 'phrase-list',
-    spaceUnit: 'phrases',
-    generate(cursor, limit) {
-      const items: KeyCandidate[] = [];
-      let i = Number(cursor);
-      for (; i < phrases.length && items.length < limit; i++) {
-        const priv = sha256(new TextEncoder().encode(phrases[i]));
-        const n = BigInt('0x' + Buffer.from(priv).toString('hex'));
-        if (inRange(n)) items.push({ priv, origin: `brain:${JSON.stringify(phrases[i]).slice(0, 60)}` });
-      }
-      return { items, nextCursor: BigInt(i), done: i >= phrases.length };
-    }
-  };
-}
-
-/**
- * constants: walk the digits of a mathematical constant, taking successive
- * substrings as the private key (the bitfinderlite construction — people have
- * used "the first N digits of pi" as a key). Cursor = digit offset.
- */
-export function constantsSource(name: string, digits: string, windowLen = 64): GrindSource {
-  const enc = new TextEncoder();
-  return {
-    name: `constants-${name}`,
-    bucket: 'constants',
-    spaceBits: Math.log2(Math.max(digits.length, 1)),
-    size: BigInt(Math.max(digits.length - windowLen, 0)),
-    spaceKind: 'digit-windows',
-    spaceUnit: 'digit windows',
-    generate(cursor, limit) {
-      const items: KeyCandidate[] = [];
-      let i = Number(cursor);
-      for (; i + 1 <= digits.length && items.length < limit; i++) {
-        // Two interpretations people actually used: decimal-substring and its
-        // hash. Use the SHA256 of the digit substring for a valid 32-byte key.
-        const sub = digits.slice(i, i + windowLen);
-        const priv = sha256(enc.encode(sub));
-        const n = BigInt('0x' + Buffer.from(priv).toString('hex'));
-        if (inRange(n)) items.push({ priv, origin: `const:${name}@${i}` });
-      }
-      return { items, nextCursor: BigInt(i), done: i + 1 > digits.length };
     }
   };
 }

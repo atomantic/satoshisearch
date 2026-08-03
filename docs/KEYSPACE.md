@@ -87,7 +87,29 @@ this as a reference band on the 0→256 axis.
 ## Honest math
 
 A linear bit axis is the correct scale because bits are already `log2(keyspace)` — each +1 bit
-doubles the work. Doubling your hardware buys exactly one more bit. At ~10^5 keys/s (JS) or
-~10^6 keys/s (native libsecp256k1) on a typical machine, 2^72 alone is still ~10^7–10^8 years.
+doubles the work. Doubling your hardware buys exactly one more bit. At ~3×10^4 keys/s (JS) or
+~5×10^6 keys/s (native libsecp256k1) on a typical machine, 2^72 alone is still ~10^7–10^8 years.
 Unbounded grinding never succeeds; the value is entirely in *bounded* weak-key classes and in
 watching the frontier move.
+
+## Multi-machine range farming (personal “collider”)
+
+Sequential puzzle ranges can be **sharded** across hosts so each machine owns a contiguous slab
+of \([2^{n-1}, 2^n)\):
+
+```sh
+# Host A
+npm run rescue:run -- --source puzzle-71 --shard 0/4 --resume
+# Host B
+npm run rescue:run -- --source puzzle-71 --shard 1/4 --resume
+# … 2/4, 3/4
+```
+
+Optional **start % / start hex** skips the bottom of the range (or a custom window). Within a
+single UI process, selected grind devices already split each batch; use `--shard` when each
+host runs its own process.
+
+**Do not assume LBC already scanned half of puzzle 71.** The historical Large Bitcoin Collider
+covered much smaller bit depths. Public puzzle-71 pools (e.g. btcpuzzle.info) have reported on
+the order of **~1%** class coverage in 2026 — check a live dashboard before skipping. Skipping
+is operator policy, not a guarantee those keys are empty.

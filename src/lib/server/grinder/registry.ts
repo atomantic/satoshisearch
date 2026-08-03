@@ -1,14 +1,13 @@
 /**
- * Registry of grinder sources the UI can start. Keeps source construction (some
- * need vendored data files) in one place so the route handlers stay thin.
+ * Registry of grinder sources the UI can start. Keeps source construction in one
+ * place so the route handlers stay thin.
+ *
+ * Deliberately absent: brainwallets and the digits of pi/e/phi. Both classes are
+ * small, public, and long since swept by everyone — they are not puzzles, and
+ * grinding them again buys nothing.
  */
-import { readFileSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import {
   puzzleRangeSource,
-  brainwalletSource,
-  constantsSource,
   lowEntropySource,
   type GrindSource
 } from './sources';
@@ -18,37 +17,14 @@ import {
   mk3ColdBootConfig,
   mk4ReseedConfig
 } from './coldcard';
-
-const datasetsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'datasets');
-
-// Mathematical constants people have used as key material (from bitfinderlite).
-const CONSTANTS: Record<string, string> = {
-  pi: '314159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798',
-  e: '271828182845904523536028747135266249775724709369995957496696762772407663035354759457138217852516642743',
-  phi: '161803398874989484820458683436563811772030917980576286213544862270526046281890244970720720418939113748'
-};
-
-function loadPhrases(): string[] {
-  const files = ['btc1', 'btc2', 'god', 'god2', 'phraselist'];
-  const out: string[] = [];
-  for (const f of files) {
-    const p = join(datasetsDir, 'phrases', `${f}.txt`);
-    if (existsSync(p)) {
-      for (const line of readFileSync(p, 'utf8').split('\n')) {
-        const t = line.trim();
-        if (t) out.push(t);
-      }
-    }
-  }
-  return [...new Set(out)];
-}
+import { resolvePuzzleWindow, isWindowSpecified, type WindowSpec } from './range-window';
 
 export interface SourceInfo {
   id: string;
   label: string;
   bucket: string;
   spaceBits: number;
-  /** sequential-keys | rng-states | phrase-list | digit-windows */
+  /** sequential-keys | rng-states */
   spaceKind: string;
   /** Human label for what spaceBits measures. */
   spaceUnit: string;
@@ -57,22 +33,21 @@ export interface SourceInfo {
   note?: string;
 }
 
-/** Build a source by id, or null if unavailable (e.g. coldcard pending model). */
-export function makeSource(id: string): GrindSource | null {
+/**
+ * Build a source by id, or null if unavailable.
+ * For puzzle-* ids, optional `window` claims a sub-range / multi-host shard.
+ */
+export function makeSource(id: string, window?: WindowSpec | null): GrindSource | null {
   if (id.startsWith('puzzle-')) {
     const n = Number(id.slice('puzzle-'.length));
-    if (n >= 1 && n <= 160) return puzzleRangeSource(n);
-    return null;
+    if (n < 1 || n > 160 || !Number.isInteger(n)) return null;
+    if (isWindowSpecified(window)) {
+      const w = resolvePuzzleWindow(n, window!);
+      return puzzleRangeSource(n, { start: w.start, end: w.end, label: w.label });
+    }
+    return puzzleRangeSource(n);
   }
   switch (id) {
-    case 'brainwallet':
-      return brainwalletSource(loadPhrases());
-    case 'constants-pi':
-      return constantsSource('pi', CONSTANTS.pi);
-    case 'constants-e':
-      return constantsSource('e', CONSTANTS.e);
-    case 'constants-phi':
-      return constantsSource('phi', CONSTANTS.phi);
     case 'lowentropy':
       return lowEntropySource(2_000_000);
     case 'coldcard':
@@ -103,29 +78,13 @@ const SOURCE_PRESENTATION: Array<{
     id: 'puzzle-71',
     label: 'Puzzle 71 range',
     description:
-      'Sequential private keys in [2^70, 2^71) — the live sealed puzzle frontier. Different from ColdCard: those keys are not low integers; they come from a weak RNG seed state.'
+      'Sequential private keys in [2^70, 2^71) — the sealed puzzle frontier. Farm shards across hosts (shard i/n) or skip a start %/hex. Every key also hits the match-set (not only #71). Public pools are ~1% class coverage, not halfway — check a live dashboard before skipping.'
   },
   {
     id: 'puzzle-72',
     label: 'Puzzle 72 range',
     description:
-      'Sequential private keys in [2^71, 2^72). Depth is comparable to ColdCard *effective entropy* only as a yardstick — the search structures are different (range vs RNG-state expand).'
-  },
-  {
-    id: 'brainwallet',
-    label: 'Brainwallets',
-    description: (src) =>
-      `SHA256 of ${src.size} known passphrases. The genuinely realistic rescue class — real people lost coins this way.`
-  },
-  {
-    id: 'constants-pi',
-    label: 'Digits of π',
-    description: 'Sliding windows over the digits of π, hashed to keys.'
-  },
-  {
-    id: 'constants-e',
-    label: 'Digits of e',
-    description: 'Sliding windows over the digits of e, hashed to keys.'
+      'Sequential private keys in [2^71, 2^72). Same multi-target match-set and shard/start-window controls as #71. Depth is a yardstick vs ColdCard effective entropy only — search geometry differs (range vs RNG-state expand).'
   },
   {
     id: 'lowentropy',
@@ -185,7 +144,7 @@ export function listSources(): SourceInfo[] {
       spaceKind: src.spaceKind ?? 'sequential-keys',
       spaceUnit: src.spaceUnit ?? '',
       description: typeof p.description === 'string' ? p.description : p.description(src),
-      // A source with an empty space (e.g. no phrase list loaded) can't be run.
+      // A source with an empty space can't be run.
       available: src.size == null || src.size > 0n,
       note: p.note
     };

@@ -6,7 +6,7 @@
  *   npx tsx scripts/rescue-runner.ts check
  *   npx tsx scripts/rescue-runner.ts run --source coldcard
  *   npx tsx scripts/rescue-runner.ts run --source coldcard --require-live
- *   npx tsx scripts/rescue-runner.ts run --source brainwallet --refresh-hours 12
+ *   npx tsx scripts/rescue-runner.ts run --source puzzle-71 --refresh-hours 12
  *
  * Does not replace the web UI; shares DATA_DIR SQLite for hits/audit/match-set.
  * Start the UI separately for monitoring, or tail RESCUE_NOTIFY_FILE / webhook.
@@ -16,9 +16,13 @@
 import { spawn } from 'node:child_process';
 import { assessRescueReadiness, formatReadiness } from '../src/lib/server/rescue/readiness.ts';
 import { notifyRescue } from '../src/lib/server/rescue/notify.ts';
-import { grinder } from '../src/lib/server/grinder/engine.ts';
-import { makeSource } from '../src/lib/server/grinder/registry.ts';
-import { openDb } from '../src/lib/server/db.ts';
+import { grinder, lastGrindCursor } from '../src/lib/server/grinder/engine.ts';
+import { makeSource, listSources } from '../src/lib/server/grinder/registry.ts';
+import {
+  parseShardToken,
+  isWindowSpecified,
+  type WindowSpec
+} from '../src/lib/server/grinder/range-window.ts';
 
 function arg(name: string, dflt?: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -43,7 +47,9 @@ function usage(): never {
   rescue-runner check [--bucket coldcard]
   rescue-runner run --source <id> [options]
 
-Sources: coldcard | brainwallet | lowentropy | puzzle-71 | puzzle-72 | constants-pi | …
+Sources: ${listSources()
+    .map((s) => s.id)
+    .join(' | ')} | puzzle-<n>
 
 Options:
   --bucket <name>       Policy bucket for readiness (default: source bucket / coldcard)
@@ -52,6 +58,13 @@ Options:
   --refresh-hours <n>   Re-run richlist:refresh when snapshot older than n hours (0=never)
   --status-sec <n>      Status print interval (default 15)
   --resume              Resume from last DB cursor for this source name
+
+Puzzle-range windows (multi-machine farm; only with --source puzzle-N):
+  --start-pct <0-100>   Skip this percent of the full puzzle range
+  --end-pct <0-100>     Stop at this percent of the full puzzle range
+  --start-hex <hex>     Absolute start private key (inclusive)
+  --end-hex <hex>       Absolute end private key (exclusive)
+  --shard <i/n>         Contiguous slab i of n (e.g. 0/4 on host A, 1/4 on B, …)
 `);
   process.exit(1);
 }
@@ -68,29 +81,43 @@ async function refreshRichlist(): Promise<void> {
   });
 }
 
-function lastCursor(sourceName: string): bigint {
-  try {
-    const row = openDb()
-      .prepare(`SELECT cursor FROM grind_source WHERE name=?`)
-      .get(sourceName) as { cursor: string } | undefined;
-    if (row?.cursor) return BigInt(row.cursor);
-  } catch {
-    /* empty */
-  }
-  return 0n;
-}
-
 async function cmdCheck(bucket: string): Promise<void> {
   const r = assessRescueReadiness({ primaryBucket: bucket });
   console.log(formatReadiness(r));
   process.exit(r.canGrind ? 0 : 2);
 }
 
+function windowFromArgs(): WindowSpec | null {
+  const startHex = arg('--start-hex') ?? null;
+  const endHex = arg('--end-hex') ?? null;
+  const startPctRaw = arg('--start-pct');
+  const endPctRaw = arg('--end-pct');
+  const startPct = startPctRaw != null ? Number(startPctRaw) : null;
+  const endPct = endPctRaw != null ? Number(endPctRaw) : null;
+  const shard = parseShardToken(arg('--shard'));
+  const spec: WindowSpec = {
+    startHex,
+    endHex,
+    startPct: startPct != null && Number.isFinite(startPct) ? startPct : null,
+    endPct: endPct != null && Number.isFinite(endPct) ? endPct : null,
+    shardIndex: shard?.shardIndex ?? null,
+    shardCount: shard?.shardCount ?? null
+  };
+  return isWindowSpecified(spec) ? spec : null;
+}
+
 async function cmdRun(): Promise<void> {
   const sourceId = arg('--source');
   if (!sourceId) usage();
 
-  const source = makeSource(sourceId!);
+  const window = windowFromArgs();
+  let source;
+  try {
+    source = makeSource(sourceId!, window);
+  } catch (e) {
+    console.error(String(e));
+    process.exit(1);
+  }
   if (!source) {
     console.error(`Unknown or unavailable source: ${sourceId}`);
     process.exit(1);
@@ -135,7 +162,7 @@ async function cmdRun(): Promise<void> {
     }
   }
 
-  const cursor = resume ? lastCursor(source.name) : 0n;
+  const cursor = resume ? lastGrindCursor(source.name) : 0n;
   const spaceSize = source.size;
 
   // Finite sources (e.g. coldcard demo slice): resume past the end means the
@@ -151,7 +178,7 @@ async function cmdRun(): Promise<void> {
   }
 
   console.log(
-    `[runner] starting source=${source.name} bucket=${source.bucket} spaceBits=${source.spaceBits.toFixed(1)} cursor=${cursor}${spaceSize != null ? `/${spaceSize}` : ''} resume=${resume}`
+    `[runner] starting source=${source.name} bucket=${source.bucket} spaceBits=${source.spaceBits.toFixed(1)} cursor=${cursor}${spaceSize != null ? `/${spaceSize}` : ''} resume=${resume}${window ? ` window=${JSON.stringify(window)}` : ''}`
   );
 
   await notifyRescue({
@@ -201,7 +228,7 @@ async function cmdRun(): Promise<void> {
     }
 
     if (!st.running) {
-      const doneCursor = lastCursor(source.name);
+      const doneCursor = lastGrindCursor(source.name);
       const exhausted = spaceSize != null && doneCursor >= spaceSize;
       console.log(
         exhausted
@@ -229,7 +256,7 @@ async function cmdRun(): Promise<void> {
         console.error('[runner] refresh failed, resuming with old set:', e);
       }
       lastRefresh = Date.now();
-      const cur = lastCursor(source.name);
+      const cur = lastGrindCursor(source.name);
       if (spaceSize != null && cur >= spaceSize) {
         console.log(`[runner] after refresh: space still exhausted (cursor=${cur}/${spaceSize}) — exiting`);
         process.exit(EXIT_DONE);

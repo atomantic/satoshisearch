@@ -78,7 +78,7 @@ const MIGRATIONS: string[] = [
 
   // 5 — grind_source: registered candidate-key generators and their progress.
   `CREATE TABLE IF NOT EXISTS grind_source (
-    name       TEXT PRIMARY KEY,            -- puzzle-range | brainwallet | constants | lowentropy | coldcard
+    name       TEXT PRIMARY KEY,            -- puzzle-range | lowentropy | coldcard (brainwallet/constants are retired)
     bucket     TEXT NOT NULL,               -- sweep classification
     config_json TEXT,
     space_bits REAL,                        -- log2 of the searchable space (may be fractional/estimate)
