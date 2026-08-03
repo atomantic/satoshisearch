@@ -64,6 +64,8 @@ REMOTE_TAG="ss-kangaroo-$$"
 REMOTE_DIR="/tmp/$REMOTE_TAG"
 REMOTE_IN="$REMOTE_DIR/in.txt"
 REMOTE_OUT="$REMOTE_DIR/result.txt"
+REMOTE_WORK_DIR="/tmp/ss-kangaroo-${pub_e}"
+REMOTE_WORK_FILE="$REMOTE_WORK_DIR/kangaroo.work"
 
 # The remote kangaroo has no controlling tty, so closing the ssh channel does not
 # reach it — without an explicit kill every Stop leaves a job burning on the GPU
@@ -72,16 +74,23 @@ REMOTE_OUT="$REMOTE_DIR/result.txt"
 # would otherwise kill the session before the kangaroo.
 KILL_PATTERN="[${REMOTE_TAG:0:1}]${REMOTE_TAG:1}"
 
+cleanup_delete_work=0
 cleaned=0
 cleanup() {
   [[ "$cleaned" -eq 1 ]] && return 0
   cleaned=1
   rm -rf "$WORKDIR"
+  
+  local delete_work=""
+  if [[ "$cleanup_delete_work" -eq 1 ]]; then
+    delete_work="rm -rf '$REMOTE_WORK_DIR';"
+  fi
+
   # rm before pkill: this command line mentions REMOTE_DIR, so the pattern also
   # matches the shell sshd spawned for the cleanup itself and takes it down —
   # fine as the last act, fatal to anything sequenced after it.
   ssh "${SSH_OPTS[@]}" "$SSH_HOST" \
-    "rm -rf '$REMOTE_DIR'; pkill -f '$KILL_PATTERN'" >/dev/null 2>&1 || true
+    "$delete_work rm -rf '$REMOTE_DIR'; pkill -f '$KILL_PATTERN'" >/dev/null 2>&1 || true
 }
 
 # The engine sends SIGTERM and follows with SIGKILL after a couple of seconds, so
@@ -108,11 +117,20 @@ IN_LOCAL="$WORKDIR/in.txt"
   printf '%s\n' "$pub_e"
 } >"$IN_LOCAL"
 
-ssh "${SSH_OPTS[@]}" "$SSH_HOST" "mkdir -p '$REMOTE_DIR'"
+ssh "${SSH_OPTS[@]}" "$SSH_HOST" "mkdir -p '$REMOTE_DIR' '$REMOTE_WORK_DIR'"
 scp "${SSH_OPTS[@]}" -q "$IN_LOCAL" "$SSH_HOST:$REMOTE_IN"
 
+# Automatically handle periodic saves and resumption if workfile options are not explicitly set
+RESUME_ARGS=""
+if [[ ! "$EXTRA" =~ -w[[:space:]] && ! "$EXTRA" =~ -i[[:space:]] ]]; then
+  if ssh "${SSH_OPTS[@]}" "$SSH_HOST" "[ -f '$REMOTE_WORK_FILE' ]" 2>/dev/null; then
+    RESUME_ARGS="-i $REMOTE_WORK_FILE"
+  fi
+  EXTRA="$EXTRA -w $REMOTE_WORK_FILE -wi 30 -ws"
+fi
+
 # -t 0 = GPU-only. EXTRA unquoted so operators can pass multiple flags.
-KANG_CMD="$REMOTE_BIN -t 0 -gpu -gpuId $GPU_ID -o $REMOTE_OUT $EXTRA $REMOTE_IN"
+KANG_CMD="$REMOTE_BIN -t 0 -gpu -gpuId $GPU_ID -o $REMOTE_OUT $EXTRA $RESUME_ARGS $REMOTE_IN"
 
 # JLP separates progress updates with a bare \r, so they have to become newlines
 # before the read loop below sees them — and that conversion must happen on the
@@ -201,6 +219,7 @@ now_ms=$(($(date +%s) * 1000))
 elapsed=$((now_ms - t0_ms))
 
 if [[ -n "$found_priv" ]]; then
+  cleanup_delete_work=1
   printf '{"event":"found","priv":"%s","ops":%s,"dps":0,"elapsedMs":%s}\n' \
     "$found_priv" "$last_ops" "$elapsed"
   exit 0
@@ -218,6 +237,7 @@ if scp "${SSH_OPTS[@]}" -q "$SSH_HOST:$REMOTE_OUT" "$OUT_LOCAL" 2>/dev/null; the
     priv="$(grep -oE '^[0-9a-fA-F]{16,64}$' "$OUT_LOCAL" | head -1)"
   fi
   if [[ -n "$priv" ]]; then
+    cleanup_delete_work=1
     priv="$(pad_priv "$priv")"
     printf '{"event":"found","priv":"%s","ops":%s,"dps":0,"elapsedMs":%s}\n' \
       "$priv" "$last_ops" "$elapsed"
@@ -235,5 +255,6 @@ if [[ "$ssh_rc" -ne 0 ]]; then
   exit 1
 fi
 
+cleanup_delete_work=1
 printf '{"event":"exhausted","ops":%s,"elapsedMs":%s}\n' "$last_ops" "$elapsed"
 exit 1
