@@ -49,7 +49,7 @@ Length-prefixed little-endian frames on stdin/stdout. See
 | Message | Use |
 |---------|-----|
 | `BATCH` | Arbitrary privkeys from Node (brainwallet, constants, …) |
-| `RANGE` | Sequential scalars `[start, start+count)` generated in C with `pubkey_create` once then `ec_pubkey_tweak_add(+1)` per step |
+| `RANGE` | Sequential scalars `[start, start+count)` generated in C: one `pubkey_create` seeds the walk, then `walk.c` advances `+G` per step |
 
 Puzzle-range and low-entropy sources use `RANGE` automatically when the binary is present.
 
@@ -70,15 +70,30 @@ JSON-line events on stdout (`progress` / `found` / `exhausted` / `cancelled`). N
 For **CUDA / remote GPU** (JeanLucPons, SSH runner, JSONL external backends), see
 [`docs/KANGAROO-GPU.md`](../../docs/KANGAROO-GPU.md).
 
+## The RANGE walk
+
+`ec_pubkey_tweak_add(+1)` looks like a cheap "next point" but is not: internally
+it runs a full generic `secp256k1_ecmult` plus a modular inversion, so the walk
+cost about as much per key as re-deriving it from scratch. `walk.c` replaces it
+with what the operation actually is — one `gej_add_ge_var` per key, staying in
+Jacobian coordinates — and converts a block of `WALK_BLOCK` points to affine
+with a single `fe_inv_var` (Montgomery's trick). That took RANGE from ~165k to
+~640k keys/s per core, at which point the loop is bound by HASH160, not secp.
+
+It is the only file that includes libsecp256k1's internal headers; the Makefile
+scopes `-I$(SECP)/src` to `walk.o` alone so secp256k1's `hash.h` can't shadow
+ours. Those headers are not a stable API, so a libsecp256k1 bump can break this
+file — `--selftest` covers the RANGE path and will catch it.
+
 ## Expected speed
 
-Rough order of magnitude on a modern multi-core Mac (Apple Silicon):
+Measured on an 18-core Apple Silicon Mac (6P + 12E, 17 worker threads):
 
 | Backend | keys/s |
 |--------|--------|
-| JS `@noble` workers | ~10⁵ |
-| **satoshi-grind BATCH** | ~10⁶ |
-| **satoshi-grind RANGE** | ~3×10⁶+ |
+| JS `@noble` workers | ~3×10⁴ |
+| **satoshi-grind BATCH** | ~4.5×10⁵ |
+| **satoshi-grind RANGE** | ~5×10⁶ |
 
 Unbounded 2⁷² search remains infeasible either way — use bounded weak-key sources.
 

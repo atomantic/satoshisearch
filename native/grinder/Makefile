@@ -21,9 +21,15 @@ ifeq ($(UNAME_S),Linux)
   LIBS += -lrt
 endif
 
-SRCS := main.c hash.c set.c
+SRCS := main.c hash.c set.c walk.c
 OBJS := $(SRCS:.c=.o)
 BIN := satoshi-grind
+
+# walk.c is the one TU that includes libsecp256k1's internal headers. Scope the
+# src/ include to this object only — a global -I would put secp256k1's own
+# hash.h ahead of ours on the search path for every other file here.
+# -Wno-unused-function: we pull in whole field/group impls but use a few ops.
+walk.o: CFLAGS += -I$(SECP)/src -Wno-unused-function
 
 KANGAROO_SRCS := kangaroo.c kangaroo_main.c
 KANGAROO_OBJS := $(KANGAROO_SRCS:.c=.o)

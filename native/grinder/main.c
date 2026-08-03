@@ -5,9 +5,9 @@
  * loads the match-set once, then streams work units:
  *
  *   BATCH — packed 32-byte private keys (arbitrary sources)
- *   RANGE — sequential scalars [start, start+count) generated here, using
- *           pubkey_create once then secp256k1_ec_pubkey_tweak_add(+1) so we
- *           walk the curve instead of re-multiplying every key.
+ *   RANGE — sequential scalars [start, start+count) generated here. One
+ *           pubkey_create seeds the walk, then walk.c advances by +G per key
+ *           with a single field inversion amortized over a whole block.
  *
  * Per key: libsecp256k1 → compressed + uncompressed → HASH160 → binary sets.
  * Origins stay on the Node side (results carry the batch index only).
@@ -20,6 +20,7 @@
  */
 #include "hash.h"
 #include "set.h"
+#include "walk.h"
 
 #include <secp256k1.h>
 
@@ -50,10 +51,6 @@ enum {
   KIND_H160_UNCOMP = 1,
   KIND_PUBKEY = 2
 };
-
-static const uint8_t SECKEY_ONE[32] = {
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 
 static bool write_all(const void *buf, size_t n) {
   const uint8_t *p = buf;
@@ -122,12 +119,6 @@ static void die(const char *fmt, ...) {
 
 /* ---- 256-bit big-endian scalar helpers -------------------------------- */
 
-static void be256_inc(uint8_t n[32]) {
-  for (int i = 31; i >= 0; i--) {
-    if (++n[i] != 0) break;
-  }
-}
-
 static void be256_add_u32(uint8_t n[32], uint32_t add) {
   uint32_t carry = add;
   for (int i = 31; i >= 0 && carry; i--) {
@@ -182,16 +173,15 @@ static bool ml_push(MatchList *ml, const Match *m) {
 
 /* ---- match one pubkey/priv pair --------------------------------------- */
 
-static void check_pub(const secp256k1_context *ctx, const H160Set *h160s, const PubSet *pubs,
-                      const secp256k1_pubkey *pub, const uint8_t priv[32], uint32_t index,
+/*
+ * Match an already-serialized point. RANGE mode gets both encodings straight
+ * from the batched walk, so it never re-serializes; BATCH mode goes through
+ * check_pub below.
+ */
+static void check_ser(const H160Set *h160s, const PubSet *pubs, const uint8_t comp[33],
+                      const uint8_t uncomp[65], const uint8_t priv[32], uint32_t index,
                       MatchList *out) {
   out->checked++;
-
-  uint8_t comp[33];
-  uint8_t uncomp[65];
-  size_t clen = 33, ulen = 65;
-  secp256k1_ec_pubkey_serialize(ctx, comp, &clen, pub, SECP256K1_EC_COMPRESSED);
-  secp256k1_ec_pubkey_serialize(ctx, uncomp, &ulen, pub, SECP256K1_EC_UNCOMPRESSED);
 
   Match m;
   m.index = index;
@@ -230,6 +220,17 @@ static void check_pub(const secp256k1_context *ctx, const H160Set *h160s, const 
     memcpy(m.matched, h, 20);
     ml_push(out, &m);
   }
+}
+
+static void check_pub(const secp256k1_context *ctx, const H160Set *h160s, const PubSet *pubs,
+                      const secp256k1_pubkey *pub, const uint8_t priv[32], uint32_t index,
+                      MatchList *out) {
+  uint8_t comp[33];
+  uint8_t uncomp[65];
+  size_t clen = 33, ulen = 65;
+  secp256k1_ec_pubkey_serialize(ctx, comp, &clen, pub, SECP256K1_EC_COMPRESSED);
+  secp256k1_ec_pubkey_serialize(ctx, uncomp, &ulen, pub, SECP256K1_EC_UNCOMPRESSED);
+  check_ser(h160s, pubs, comp, uncomp, priv, index, out);
 }
 
 static void check_one(const secp256k1_context *ctx, const H160Set *h160s, const PubSet *pubs,
@@ -350,44 +351,66 @@ typedef struct {
   const uint8_t *range_start; /* 32-byte BE scalar for index 0 */
 } RangeWorkerArg;
 
+/* Per-key fallback, used when the walk can't be set up or stalls. */
+static void range_slow(RangeWorkerArg *wa, uint32_t from, uint32_t to) {
+  for (uint32_t i = from; i < to; i++) {
+    uint8_t priv[32];
+    be256_copy_add_u32(priv, wa->range_start, i);
+    check_one(wa->ctx, wa->h160s, wa->pubs, priv, i, &wa->c.local);
+  }
+}
+
 static void *range_worker_fn(void *arg) {
   RangeWorkerArg *wa = arg;
   ml_init(&wa->c.local);
   if (wa->c.start >= wa->c.end) return NULL;
 
-  uint8_t priv[32];
-  be256_copy_add_u32(priv, wa->range_start, wa->c.start);
+  walk_ctx *w = walk_create(wa->ctx);
+  uint8_t *comp = malloc((size_t)WALK_BLOCK * 33);
+  uint8_t *uncomp = malloc((size_t)WALK_BLOCK * 65);
 
-  secp256k1_pubkey pub;
-  bool have_pub = false;
+  if (!w || !comp || !uncomp) {
+    range_slow(wa, wa->c.start, wa->c.end);
+  } else {
+    uint32_t i = wa->c.start;
+    bool seeded = false;
 
-  for (uint32_t i = wa->c.start; i < wa->c.end; i++) {
-    if (!have_pub) {
-      if (secp256k1_ec_seckey_verify(wa->ctx, priv) &&
-          secp256k1_ec_pubkey_create(wa->ctx, &pub, priv)) {
-        have_pub = true;
-      } else {
-        /* invalid scalar — advance and re-create next */
-        be256_inc(priv);
-        continue;
+    while (i < wa->c.end) {
+      if (!seeded) {
+        uint8_t priv[32];
+        be256_copy_add_u32(priv, wa->range_start, i);
+        if (!walk_start(w, priv)) {
+          i++; /* not a valid scalar — nothing to check here */
+          continue;
+        }
+        seeded = true;
       }
-    }
 
-    check_pub(wa->ctx, wa->h160s, wa->pubs, &pub, priv, i, &wa->c.local);
+      uint32_t want = wa->c.end - i;
+      if (want > WALK_BLOCK) want = WALK_BLOCK;
 
-    if (i + 1 >= wa->c.end) break;
+      uint32_t got = walk_next(w, want, comp, uncomp);
+      for (uint32_t j = 0; j < got; j++) {
+        uint8_t priv[32];
+        be256_copy_add_u32(priv, wa->range_start, i + j);
+        check_ser(wa->h160s, wa->pubs, comp + (size_t)j * 33, uncomp + (size_t)j * 65, priv,
+                  i + j, &wa->c.local);
+      }
+      i += got;
 
-    be256_inc(priv);
-    /* Walk the curve: P_{k+1} = P_k + G via tweak_add(1). Far cheaper than
-     * full scalar mult. On rare failure, fall back to create from priv. */
-    if (!secp256k1_ec_pubkey_tweak_add(wa->ctx, &pub, SECKEY_ONE)) {
-      have_pub = false;
-      if (secp256k1_ec_seckey_verify(wa->ctx, priv) &&
-          secp256k1_ec_pubkey_create(wa->ctx, &pub, priv)) {
-        have_pub = true;
+      if (got < want) {
+        /* Walk stalled on index i (point at infinity). Resolve that one key
+         * the slow way so i always advances, then re-seed after it. */
+        range_slow(wa, i, i + 1);
+        i++;
+        seeded = false;
       }
     }
   }
+
+  free(comp);
+  free(uncomp);
+  walk_destroy(w);
   return NULL;
 }
 
@@ -705,7 +728,7 @@ static int run_selftest(void) {
   }
   ml_free(&ml);
 
-  /* RANGE mode: plant key 42, walk [1, 100) via tweak_add, expect index 41 */
+  /* RANGE mode: plant key 42, walk [1, 100), expect index 41 */
   uint8_t plant42[32];
   int_to_priv(42, plant42);
   secp256k1_pubkey pub42;
@@ -736,6 +759,49 @@ static int run_selftest(void) {
   }
   ml_free(&ml);
   h160_set_free(&range_set);
+
+  /*
+   * RANGE across a walk-block boundary. The 100-key case above fits in a
+   * single block, so it never exercises the re-seed at the block edge or the
+   * batched affine conversion at full width. Plant past WALK_BLOCK and walk
+   * more than two blocks on one thread so the whole range is one walk.
+   */
+  const uint32_t edge_key = WALK_BLOCK + 500;
+  const uint32_t edge_count = 2 * WALK_BLOCK + 64;
+  uint8_t plant_edge[32];
+  int_to_priv((int)edge_key, plant_edge);
+  secp256k1_pubkey pub_edge;
+  if (!secp256k1_ec_pubkey_create(ctx, &pub_edge, plant_edge)) {
+    fprintf(stderr, "selftest: plant_edge create failed\n");
+    return 1;
+  }
+  uint8_t comp_edge[33];
+  size_t ce = 33;
+  secp256k1_ec_pubkey_serialize(ctx, comp_edge, &ce, &pub_edge, SECP256K1_EC_COMPRESSED);
+  uint8_t h_edge[20];
+  hash160(comp_edge, 33, h_edge);
+  H160Set edge_set;
+  h160_set_init(&edge_set, 1);
+  h160_set_insert(&edge_set, h_edge);
+
+  grind_range(ctx, &edge_set, &pubs, start, edge_count, 1, &ml);
+  if (ml.len != 1 || ml.items[0].index != edge_key - 1) {
+    fprintf(stderr, "selftest: range should match index %u across block edge, got len=%zu index=%u\n",
+            edge_key - 1, ml.len, ml.len ? ml.items[0].index : 0);
+    return 1;
+  }
+  if (memcmp(ml.items[0].priv, plant_edge, 32) != 0) {
+    fprintf(stderr, "selftest: cross-block range match priv mismatch\n");
+    return 1;
+  }
+  /* Every key in the range must be accounted for — a walk that silently
+   * dropped a block would still find the plant but under-count. */
+  if (ml.checked != edge_count) {
+    fprintf(stderr, "selftest: range checked %u keys, expected %u\n", ml.checked, edge_count);
+    return 1;
+  }
+  ml_free(&ml);
+  h160_set_free(&edge_set);
 
   h160_set_free(&empty);
   h160_set_free(&planted);
