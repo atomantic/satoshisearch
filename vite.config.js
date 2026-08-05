@@ -29,11 +29,11 @@ const repoRoot = fileURLToPath(new URL('.', import.meta.url));
 //
 // Caveat: Vite reads the cert once, at config load. When the Tailscale cert is
 // renewed this dev server keeps serving the old one until it is restarted.
-const certDirs = [
+const certDirs = /** @type {string[]} */ ([
   process.env.CERT_DIR,
   join(repoRoot, 'certs'),
   join(repoRoot, '..', 'PortOS', 'data', 'certs')
-].filter(Boolean);
+].filter(Boolean));
 
 function loadCert() {
   for (const dir of certDirs) {
