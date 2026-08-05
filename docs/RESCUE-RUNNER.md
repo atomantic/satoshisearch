@@ -134,6 +134,17 @@ rescue wins when:
 
 Payload fields include `event`, `bucket`, `address`, `balanceSats`, `action` (held/dry-run/swept), `txid`.
 
+## Export & Audit Reporting
+
+The `/rescue` UI and REST endpoints provide export of recovered hits and tamper-evident audit records in JSON or CSV format:
+
+| Endpoint | Formats | Query Filters | Purpose |
+|----------|---------|---------------|---------|
+| `/api/export/hits` | `format=json`, `format=csv` | `status` (`held`/`swept`/`dry-run`/`failed`), `bucket`, `q` | Export recovered keys, balances, claims & sweep txids |
+| `/api/export/audit` | `format=json`, `format=csv` | `event`, `q` | Export hash-chained audit log with cryptographic verification status |
+
+Use the top-level toolbar on the `/rescue` page or invoke the endpoints directly for automated reporting.
+
 ## Playbook: next weak-key event
 
 1. **Model the space** (like ColdCard: RNG state → BIP39 → paths, not sequential key range).  
@@ -142,10 +153,11 @@ Payload fields include `event`, `bucket`, `address`, `balanceSats`, `action` (he
 4. Refresh match-set from **your node** (UTXO dump).  
 5. Start runner with `--resume` and notifications.  
 6. Keep dry-run until a test hit signs cleanly; then arm live only if policy allows.  
-7. After event: stop runner, export audit/claims, rotate ops notes — do not leave live broadcast on.
+7. After event: stop runner, export audit/claims via `/api/export/hits` or `/rescue` UI, rotate ops notes — do not leave live broadcast on.
 
 ## Related
 
 - [RESCUE-POLICY.md](./RESCUE-POLICY.md) — legal/ethical gates  
 - [RNG-SPACE.md](./RNG-SPACE.md) — ColdCard-shaped spaces  
 - Settings UI — vault, dest, dry-run, buckets, attestation  
+

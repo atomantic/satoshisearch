@@ -6,17 +6,43 @@ import { assessRescueReadiness } from '$server/rescue/readiness';
 import { effectiveRescue } from '$server/settings';
 import { addressLink, txLink } from '$server/links';
 
-export const load: PageServerLoad = async () => {
+export const load: PageServerLoad = async ({ url }) => {
   const db = openDb();
+
+  const filterStatus = url.searchParams.get('status') ?? 'all';
+  const filterBucket = url.searchParams.get('bucket') ?? 'all';
+  const q = (url.searchParams.get('q') ?? '').trim();
+
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filterStatus !== 'all') {
+    conditions.push('h.status = ?');
+    params.push(filterStatus);
+  }
+
+  if (filterBucket !== 'all') {
+    conditions.push('h.bucket = ?');
+    params.push(filterBucket);
+  }
+
+  if (q) {
+    conditions.push('(h.address LIKE ? OR h.source_name LIKE ? OR c.sweep_txid LIKE ?)');
+    const pattern = `%${q}%`;
+    params.push(pattern, pattern, pattern);
+  }
+
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const hits = db
     .prepare(
       `SELECT h.id, h.bucket, h.source_name, h.found_at, h.address, h.balance_at_find bal, h.status,
               c.sweep_txid txid, c.dest_address dest
        FROM hit h LEFT JOIN claim c ON c.hit_id = h.id
-       ORDER BY h.found_at DESC LIMIT 100`
+       ${whereClause}
+       ORDER BY h.found_at DESC LIMIT 200`
     )
-    .all() as Array<{
+    .all(...params) as Array<{
     id: number;
     bucket: string;
     source_name: string;
@@ -28,6 +54,10 @@ export const load: PageServerLoad = async () => {
     dest: string | null;
   }>;
 
+  const buckets = db
+    .prepare(`SELECT DISTINCT bucket FROM hit WHERE bucket IS NOT NULL`)
+    .all() as Array<{ bucket: string }>;
+
   const totals = db
     .prepare(
       `SELECT COUNT(*) hits, COALESCE(SUM(balance_at_find),0) sats,
@@ -38,7 +68,7 @@ export const load: PageServerLoad = async () => {
     .get() as { hits: number; sats: number; swept: number; held: number };
 
   const verification = verifyAudit();
-  const audit = recentAudit(60);
+  const audit = recentAudit(100);
   const rescue = effectiveRescue();
   const readiness = assessRescueReadiness({ primaryBucket: 'coldcard' });
 
@@ -48,6 +78,12 @@ export const load: PageServerLoad = async () => {
       link: h.address ? addressLink(h.address) : null,
       txLink: h.txid ? txLink(h.txid) : null
     })),
+    availableBuckets: Array.from(new Set(['coldcard', 'puzzle', 'richlist', 'low-entropy', ...buckets.map((b) => b.bucket)])),
+    filters: {
+      status: filterStatus,
+      bucket: filterBucket,
+      q
+    },
     totals,
     verification,
     audit,
@@ -79,3 +115,4 @@ export const actions: Actions = {
     return { verification: verifyAudit() };
   }
 };
+
