@@ -166,14 +166,17 @@ async function txPageAfter(sh: string, lastTxid: string, style: TxCursorStyle): 
 }
 
 /**
- * The page following `lastTxid`, using the cursor this node is known to accept
- * or probing for it. A style is rejected when the node 404s it or ignores it
- * (every tx on the returned page is already in `seen`). `[]` means the end.
+ * The page following `lastTxid`, trying the cursor this node is known to accept
+ * first and the other style after it, so a node swapped behind the same URL
+ * re-detects instead of truncating history. A style is rejected when the node
+ * 404s it or ignores it (every tx on the returned page is already in `seen`).
+ * `[]` means the end.
  */
 async function nextTxPage(sh: string, lastTxid: string, seen: Map<string, Tx>): Promise<Tx[]> {
   const node = effectiveRuntime().mempoolApiUrl;
   const known = txCursorStyleByNode.get(node);
-  for (const style of known ? [known] : TX_CURSOR_STYLES) {
+  const styles = known ? [known, ...TX_CURSOR_STYLES.filter((s) => s !== known)] : TX_CURSOR_STYLES;
+  for (const style of styles) {
     const page = await txPageAfter(sh, lastTxid, style);
     if (page === null) continue;
     if (page.length && page.every((tx) => seen.has(tx.txid))) continue;

@@ -48,11 +48,14 @@ type Flavour = 'mempool-backend' | 'esplora' | 'cursor-ignored';
 interface FakeNode {
   url: string;
   requests: string[];
+  /** Swap the backend behind the same URL mid-test. */
+  setFlavour: (f: Flavour) => void;
   close: () => Promise<void>;
 }
 
 /** A node serving `txs` under one of the real-world pagination behaviours. */
-function fakeNode(flavour: Flavour, txs: Tx[], pageSize: number): Promise<FakeNode> {
+function fakeNode(initial: Flavour, txs: Tx[], pageSize: number): Promise<FakeNode> {
+  let flavour = initial;
   const requests: string[] = [];
   const pageAfter = (last: string | null): Tx[] => {
     const start = last === null ? 0 : txs.findIndex((t) => t.txid === last) + 1;
@@ -89,6 +92,9 @@ function fakeNode(flavour: Flavour, txs: Tx[], pageSize: number): Promise<FakeNo
       resolve({
         url: `http://127.0.0.1:${port}`,
         requests,
+        setFlavour: (f) => {
+          flavour = f;
+        },
         close: () => new Promise<void>((done) => server.close(() => done()))
       });
     });
@@ -169,5 +175,18 @@ test('a tx_count above the first page still walks the remaining pages', async ()
     const got = await scriptTxsAll(SCRIPT, { expected: 15 });
     assert.equal(got.length, 15, 'page two is fetched when page one falls short of the count');
     assert.equal(count(node, 'after_txid='), 1);
+  });
+});
+
+test('a memoized cursor that stops working is re-probed, not treated as the end', async () => {
+  const txs = history(30);
+  await withNode('mempool-backend', txs, 10, async (node) => {
+    assert.equal((await scriptTxsAll(SCRIPT)).length, 30, 'warm-up memoizes after_txid for this URL');
+    node.setFlavour('esplora');
+    node.requests.length = 0;
+    const got = await scriptTxsAll(SCRIPT);
+    assert.equal(got.length, 30, 'esplora behind the same URL still yields the full history');
+    assert.ok(count(node, 'after_txid=') >= 1, 'the stale memo was tried first');
+    assert.ok(count(node, '/txs/chain/') >= 1, 'then the other cursor took over');
   });
 });
