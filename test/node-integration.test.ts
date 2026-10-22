@@ -47,6 +47,11 @@ test('puzzle 71/72 are sealed+funded; 160 is exposed+funded', async (t) => {
   assert.ok(p71.balance > 0);
   assert.equal(p71.pubkeyExposed, false);
 
+  // Puzzle 160's pubkey was revealed by a spend from its address (block 578732),
+  // which the chain can never undo, so `exposed` is stable until the day it is
+  // swept (→ `solved`). Its reveal tx sits behind the first page of its history,
+  // so a client that stops paginating early misclassifies it as `sealed`
+  // (issue #3); see mempool-pagination.test.ts for the offline guard.
   const p160 = await classifyPuzzle(targets[159].scriptHex);
   assert.equal(p160.status, 'exposed');
   assert.ok(p160.balance > 0);

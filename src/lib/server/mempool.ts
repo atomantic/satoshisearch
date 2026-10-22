@@ -138,20 +138,81 @@ export async function scriptTxs(scriptPubKeyHex: string): Promise<Tx[]> {
 }
 
 /**
- * All confirmed txs touching a scriptPubKey, paginated via /txs/chain/:last.
- * Esplora returns 25 confirmed per page. Capped at `max` to bound pathological
- * addresses (genesis has 64K txs); puzzle addresses are well under the cap.
+ * Which pagination cursor the node accepts for `/scripthash/:sh/txs`. Detected
+ * on first use and remembered per node URL, so a Settings change that points at
+ * a different node re-detects.
+ *
+ *   after_txid — mempool backend (`?after_txid=<last>`, 10 txs per page).
+ *   chain      — esplora / electrs REST (`/txs/chain/<last>`, 25 per page).
+ */
+type TxCursorStyle = 'after_txid' | 'chain';
+let txCursorStyle: TxCursorStyle | null = null;
+let txCursorStyleFor = '';
+
+/**
+ * Fetch the page of confirmed txs that follows `lastTxid`, or `null` when the
+ * node rejects that cursor style outright (404), so the caller can try the other.
+ */
+async function txPageAfter(sh: string, lastTxid: string, style: TxCursorStyle): Promise<Tx[] | null> {
+  const path =
+    style === 'after_txid'
+      ? `/api/scripthash/${sh}/txs?after_txid=${lastTxid}`
+      : `/api/scripthash/${sh}/txs/chain/${lastTxid}`;
+  const res = await req(path);
+  const text = await res.text();
+  if (res.status === 404) return null;
+  if (!res.ok) throw new HttpError(res.status, path, text);
+  try {
+    return JSON.parse(text) as Tx[];
+  } catch {
+    throw new Error(`Non-JSON response for ${path}: ${text.slice(0, 120)}`);
+  }
+}
+
+/**
+ * All confirmed txs touching a scriptPubKey, newest first.
+ *
+ * The first page is `/txs` (mempool + recent confirmed). Later pages are fetched
+ * with whichever cursor the node understands — the mempool backend takes
+ * `?after_txid=`, esplora/electrs take `/txs/chain/:last` — and we keep going
+ * until a page comes back empty or adds nothing new. Never assume a page size:
+ * the mempool backend serves 10 per page where esplora serves 25, and stopping
+ * on "fewer than 25" silently hid every spend past the first page (the puzzle
+ * 160 reveal, for one). A backend that ignores the cursor echoes the same page,
+ * which the dedup catches, so this cannot loop forever. Capped at `max` to bound
+ * pathological scripts (genesis has 64K txs); puzzle addresses are well under it.
  */
 export async function scriptTxsAll(scriptPubKeyHex: string, max = 200): Promise<Tx[]> {
   const sh = scriptHash(scriptPubKeyHex);
+  const base = effectiveRuntime().mempoolApiUrl;
+  if (txCursorStyleFor !== base) {
+    txCursorStyle = null;
+    txCursorStyleFor = base;
+  }
   const all: Tx[] = [];
-  // First page: /txs (mempool + recent confirmed). Then paginate confirmed via
-  // /txs/chain/:lastTxid. This node 404s on a bare /txs/chain (no last txid).
+  const seen = new Set<string>();
   let page = await getJson<Tx[]>(`/api/scripthash/${sh}/txs`);
   while (page.length && all.length < max) {
-    all.push(...page);
-    if (page.length < 25) break;
-    page = await getJson<Tx[]>(`/api/scripthash/${sh}/txs/chain/${page[page.length - 1].txid}`);
+    let added = 0;
+    for (const tx of page) {
+      if (seen.has(tx.txid)) continue;
+      seen.add(tx.txid);
+      all.push(tx);
+      added++;
+    }
+    if (!added || all.length >= max) break;
+    const last = page[page.length - 1].txid;
+    const styles: TxCursorStyle[] = txCursorStyle ? [txCursorStyle] : ['after_txid', 'chain'];
+    let next: Tx[] = [];
+    for (const style of styles) {
+      const candidate = await txPageAfter(sh, last, style);
+      if (candidate === null) continue; // 404: this node doesn't speak that cursor
+      if (candidate.length && candidate.every((tx) => seen.has(tx.txid))) continue; // cursor ignored
+      txCursorStyle = style;
+      next = candidate;
+      break;
+    }
+    page = next;
   }
   return all;
 }
