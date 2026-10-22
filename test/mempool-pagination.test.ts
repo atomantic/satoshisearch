@@ -14,11 +14,12 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer, type Server } from 'node:http';
+import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Tx } from '../src/lib/server/mempool.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'ss-mempool-pages-'));
 process.env.DATA_DIR = dir;
@@ -30,17 +31,12 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 // Any valid scriptPubKey works; the fake node ignores the hash.
 const SCRIPT = '76a914' + 'ab'.repeat(20) + '88ac';
 
-interface FakeTx {
-  txid: string;
-  vin: never[];
-  vout: never[];
-  status: { confirmed: boolean; block_height: number };
-}
-
-function history(n: number): FakeTx[] {
-  // Newest first, like the real endpoints.
+/** `n` confirmed txs with empty inputs/outputs, newest first like the real endpoints. */
+function history(n: number): Tx[] {
   return Array.from({ length: n }, (_, i) => ({
     txid: (n - i).toString(16).padStart(64, '0'),
+    version: 1,
+    locktime: 0,
     vin: [],
     vout: [],
     status: { confirmed: true, block_height: 100_000 + (n - i) }
@@ -56,13 +52,13 @@ interface FakeNode {
 }
 
 /** A node serving `txs` under one of the real-world pagination behaviours. */
-function fakeNode(flavour: Flavour, txs: FakeTx[], pageSize: number): Promise<FakeNode> {
+function fakeNode(flavour: Flavour, txs: Tx[], pageSize: number): Promise<FakeNode> {
   const requests: string[] = [];
-  const pageAfter = (last: string | null): FakeTx[] => {
+  const pageAfter = (last: string | null): Tx[] => {
     const start = last === null ? 0 : txs.findIndex((t) => t.txid === last) + 1;
     return txs.slice(start, start + pageSize);
   };
-  const server: Server = createServer((req, res) => {
+  const server = createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://x');
     requests.push(url.pathname + url.search);
     const json = (body: unknown) => {
@@ -101,7 +97,7 @@ function fakeNode(flavour: Flavour, txs: FakeTx[], pageSize: number): Promise<Fa
 
 async function withNode(
   flavour: Flavour,
-  txs: FakeTx[],
+  txs: Tx[],
   pageSize: number,
   fn: (node: FakeNode) => Promise<void>
 ): Promise<void> {
@@ -116,50 +112,62 @@ async function withNode(
 }
 
 const txids = (txs: { txid: string }[]) => txs.map((t) => t.txid);
+const count = (node: FakeNode, needle: string) => node.requests.filter((r) => r.includes(needle)).length;
 
 test('mempool backend: walks every 10-tx page via after_txid, past the old 25-row stop', async () => {
+  // 23 txs at 10 per page: the first page is "short" by the old 25-row rule yet
+  // two more pages follow — the exact shape that hid puzzle 160's reveal spend.
   const txs = history(23);
   await withNode('mempool-backend', txs, 10, async (node) => {
     const got = await scriptTxsAll(SCRIPT);
     assert.deepEqual(txids(got), txids(txs), 'all 23 txs, newest first, none duplicated');
-    assert.equal(node.requests.filter((r) => r.includes('after_txid=')).length, 3, 'three cursor pages (10, 10, 3)');
-    assert.equal(node.requests.filter((r) => r.includes('/txs/chain/')).length, 0, 'after_txid worked first, so the esplora cursor is never tried');
+    assert.equal(count(node, '/txs/chain/'), 1, 'esplora cursor probed once (404), then dropped');
+    assert.equal(count(node, 'after_txid='), 3, 'three cursor pages (10, 10, 3)');
   });
 });
 
-test('esplora: ignores after_txid, so the client falls back to /txs/chain/:last', async () => {
+test('esplora: /txs/chain/:last works first time, so after_txid is never probed', async () => {
   const txs = history(60);
   await withNode('esplora', txs, 25, async (node) => {
     const got = await scriptTxsAll(SCRIPT);
     assert.deepEqual(txids(got), txids(txs), 'all 60 txs across 25/25/10 pages');
-    assert.equal(node.requests.filter((r) => r.includes('/txs/chain/')).length, 3);
-    assert.equal(node.requests.filter((r) => r.includes('after_txid=')).length, 1, 'echoed first page detected once');
+    assert.equal(count(node, '/txs/chain/'), 3);
+    assert.equal(count(node, 'after_txid='), 0);
   });
 });
 
-test('a node that ignores both cursors terminates after one echoed page', async () => {
+test('a node that ignores both cursors terminates after one echoed page each', async () => {
   const txs = history(10);
   await withNode('cursor-ignored', txs, 10, async (node) => {
     const got = await scriptTxsAll(SCRIPT);
     assert.deepEqual(txids(got), txids(txs));
-    assert.ok(node.requests.length <= 3, `bounded request count, got ${node.requests.length}`);
+    assert.equal(node.requests.length, 3, 'first page, then one echo per cursor style');
   });
 });
 
 test('the max cap stops pagination once enough txs are collected', async () => {
   const txs = history(100);
   await withNode('mempool-backend', txs, 10, async (node) => {
-    const got = await scriptTxsAll(SCRIPT, 25);
+    const got = await scriptTxsAll(SCRIPT, { max: 25 });
     assert.equal(got.length, 30, 'stops at the first page boundary at or past the cap');
-    assert.equal(node.requests.length, 3, `first page plus two cursor pages: ${node.requests.join(" ")}`);
+    assert.equal(node.requests.length, 4, `first page, one 404 probe, two cursor pages: ${node.requests.join(' ')}`);
   });
 });
 
-test('a short first page is not the end of the history', async () => {
-  // The exact shape that hid puzzle 160: 15 txs, 10 per page, spend on page two.
+test("the node's tx_count skips the trailing empty-page request", async () => {
+  const txs = history(7);
+  await withNode('mempool-backend', txs, 10, async (node) => {
+    const got = await scriptTxsAll(SCRIPT, { expected: 7 });
+    assert.equal(got.length, 7);
+    assert.equal(node.requests.length, 1, 'the first page already held every tx');
+  });
+});
+
+test('a tx_count above the first page still walks the remaining pages', async () => {
   const txs = history(15);
-  await withNode('mempool-backend', txs, 10, async () => {
-    const got = await scriptTxsAll(SCRIPT);
-    assert.equal(got.length, 15);
+  await withNode('mempool-backend', txs, 10, async (node) => {
+    const got = await scriptTxsAll(SCRIPT, { expected: 15 });
+    assert.equal(got.length, 15, 'page two is fetched when page one falls short of the count');
+    assert.equal(count(node, 'after_txid='), 1);
   });
 });

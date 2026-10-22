@@ -80,10 +80,13 @@ export async function classifyPuzzle(scriptHex: string): Promise<{
   // spent_txo_sum as 0 for every script (verified: puzzles 140/160 are provably
   // spent-from yet report spent_txo_count=0). funded_txo_sum still equals the
   // true net balance (matches public mempool.space exactly), so balance is fine;
-  // only the spend flag is unusable. We paginate every page so a spend hidden
-  // behind the first page (p71 has 70+ txs; p160's 2017 reveal sits behind its
-  // later fundings) is not missed.
-  const txs = await scriptTxsAll(scriptHex);
+  // only the spend flag is unusable. We walk every page so a spend hidden
+  // behind the first page (p71 has 70+ txs; p160's reveal sits behind its later
+  // fundings) is not missed; tx_count is honest on this node and lets the walk
+  // skip the trailing empty-page request for the ~250 single-page puzzles.
+  const txs = await scriptTxsAll(scriptHex, {
+    expected: status.chain_stats.tx_count + status.mempool_stats.tx_count
+  });
   const spend = findSpend(txs, scriptHex);
   const everSpent = spend !== null;
 

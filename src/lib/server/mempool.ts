@@ -138,83 +138,76 @@ export async function scriptTxs(scriptPubKeyHex: string): Promise<Tx[]> {
 }
 
 /**
- * Which pagination cursor the node accepts for `/scripthash/:sh/txs`. Detected
- * on first use and remembered per node URL, so a Settings change that points at
- * a different node re-detects.
+ * Which pagination cursor a node accepts for `/scripthash/:sh/txs`, remembered
+ * per node URL so a Settings change that points elsewhere re-detects:
  *
+ *   chain      — esplora / electrs REST (`/txs/chain/<last>`, 25 txs per page).
  *   after_txid — mempool backend (`?after_txid=<last>`, 10 txs per page).
- *   chain      — esplora / electrs REST (`/txs/chain/<last>`, 25 per page).
+ *
+ * `chain` is probed first because its failure mode is a cheap 404; a node that
+ * ignores `?after_txid=` instead echoes the whole first page back.
  */
-type TxCursorStyle = 'after_txid' | 'chain';
-let txCursorStyle: TxCursorStyle | null = null;
-let txCursorStyleFor = '';
+type TxCursorStyle = 'chain' | 'after_txid';
+const TX_CURSOR_STYLES: TxCursorStyle[] = ['chain', 'after_txid'];
+const txCursorStyleByNode = new Map<string, TxCursorStyle>();
 
-/**
- * Fetch the page of confirmed txs that follows `lastTxid`, or `null` when the
- * node rejects that cursor style outright (404), so the caller can try the other.
- */
+/** The confirmed-tx page after `lastTxid` under one cursor style; `null` when the node 404s it. */
 async function txPageAfter(sh: string, lastTxid: string, style: TxCursorStyle): Promise<Tx[] | null> {
   const path =
-    style === 'after_txid'
-      ? `/api/scripthash/${sh}/txs?after_txid=${lastTxid}`
-      : `/api/scripthash/${sh}/txs/chain/${lastTxid}`;
-  const res = await req(path);
-  const text = await res.text();
-  if (res.status === 404) return null;
-  if (!res.ok) throw new HttpError(res.status, path, text);
+    style === 'chain'
+      ? `/api/scripthash/${sh}/txs/chain/${lastTxid}`
+      : `/api/scripthash/${sh}/txs?after_txid=${lastTxid}`;
   try {
-    return JSON.parse(text) as Tx[];
-  } catch {
-    throw new Error(`Non-JSON response for ${path}: ${text.slice(0, 120)}`);
+    return await getJson<Tx[]>(path);
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 404) return null;
+    throw e;
   }
 }
 
 /**
- * All confirmed txs touching a scriptPubKey, newest first.
- *
- * The first page is `/txs` (mempool + recent confirmed). Later pages are fetched
- * with whichever cursor the node understands — the mempool backend takes
- * `?after_txid=`, esplora/electrs take `/txs/chain/:last` — and we keep going
- * until a page comes back empty or adds nothing new. Never assume a page size:
- * the mempool backend serves 10 per page where esplora serves 25, and stopping
- * on "fewer than 25" silently hid every spend past the first page (the puzzle
- * 160 reveal, for one). A backend that ignores the cursor echoes the same page,
- * which the dedup catches, so this cannot loop forever. Capped at `max` to bound
- * pathological scripts (genesis has 64K txs); puzzle addresses are well under it.
+ * The page following `lastTxid`, using the cursor this node is known to accept
+ * or probing for it. A style is rejected when the node 404s it or ignores it
+ * (every tx on the returned page is already in `seen`). `[]` means the end.
  */
-export async function scriptTxsAll(scriptPubKeyHex: string, max = 200): Promise<Tx[]> {
+async function nextTxPage(sh: string, lastTxid: string, seen: Map<string, Tx>): Promise<Tx[]> {
+  const node = effectiveRuntime().mempoolApiUrl;
+  const known = txCursorStyleByNode.get(node);
+  for (const style of known ? [known] : TX_CURSOR_STYLES) {
+    const page = await txPageAfter(sh, lastTxid, style);
+    if (page === null) continue;
+    if (page.length && page.every((tx) => seen.has(tx.txid))) continue;
+    txCursorStyleByNode.set(node, style);
+    return page;
+  }
+  return [];
+}
+
+/**
+ * All txs touching a scriptPubKey, newest first: the `/txs` first page (mempool
+ * + recent confirmed), then confirmed pages via `nextTxPage` until one comes
+ * back empty. Page size is never assumed — it differs per backend, and stopping
+ * on a "short" page is exactly how spends past page one went missing.
+ *
+ * `expected` is the node's own tx count for the script (`chain_stats.tx_count
+ * + mempool_stats.tx_count`); when the first page already holds that many, the
+ * trailing empty-page request is skipped. `max` bounds pathological scripts
+ * (genesis has 64K txs); puzzle addresses are well under it.
+ */
+export async function scriptTxsAll(
+  scriptPubKeyHex: string,
+  { max = 200, expected = Infinity }: { max?: number; expected?: number } = {}
+): Promise<Tx[]> {
   const sh = scriptHash(scriptPubKeyHex);
-  const base = effectiveRuntime().mempoolApiUrl;
-  if (txCursorStyleFor !== base) {
-    txCursorStyle = null;
-    txCursorStyleFor = base;
-  }
-  const all: Tx[] = [];
-  const seen = new Set<string>();
+  const byId = new Map<string, Tx>();
+  const stopAt = Math.min(max, expected);
   let page = await getJson<Tx[]>(`/api/scripthash/${sh}/txs`);
-  while (page.length && all.length < max) {
-    let added = 0;
-    for (const tx of page) {
-      if (seen.has(tx.txid)) continue;
-      seen.add(tx.txid);
-      all.push(tx);
-      added++;
-    }
-    if (!added || all.length >= max) break;
-    const last = page[page.length - 1].txid;
-    const styles: TxCursorStyle[] = txCursorStyle ? [txCursorStyle] : ['after_txid', 'chain'];
-    let next: Tx[] = [];
-    for (const style of styles) {
-      const candidate = await txPageAfter(sh, last, style);
-      if (candidate === null) continue; // 404: this node doesn't speak that cursor
-      if (candidate.length && candidate.every((tx) => seen.has(tx.txid))) continue; // cursor ignored
-      txCursorStyle = style;
-      next = candidate;
-      break;
-    }
-    page = next;
+  while (page.length) {
+    for (const tx of page) if (!byId.has(tx.txid)) byId.set(tx.txid, tx);
+    if (byId.size >= stopAt) break;
+    page = await nextTxPage(sh, page[page.length - 1].txid, byId);
   }
-  return all;
+  return [...byId.values()];
 }
 
 /** Sum of confirmed UTXO values (sats) — authoritative balance, node-mode-agnostic. */
