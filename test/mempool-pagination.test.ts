@@ -43,7 +43,7 @@ function history(n: number): Tx[] {
   }));
 }
 
-type Flavour = 'mempool-backend' | 'esplora' | 'cursor-ignored';
+type Flavour = 'mempool-backend' | 'esplora' | 'cursor-ignored' | 'both-404';
 
 interface FakeNode {
   url: string;
@@ -76,10 +76,11 @@ function fakeNode(initial: Flavour, txs: Tx[], pageSize: number): Promise<FakeNo
     if (chain) {
       if (flavour === 'esplora') return json(pageAfter(chain[1]));
       if (flavour === 'cursor-ignored') return json(pageAfter(null));
-      return notFound();
+      return notFound(); // mempool-backend and both-404
     }
     if (url.pathname.endsWith('/txs')) {
       const after = url.searchParams.get('after_txid');
+      if (after !== null && flavour === 'both-404') return notFound();
       if (flavour === 'mempool-backend') return json(pageAfter(after));
       // esplora and the broken node ignore the query param entirely.
       return json(pageAfter(null));
@@ -188,5 +189,12 @@ test('a memoized cursor that stops working is re-probed, not treated as the end'
     assert.equal(got.length, 30, 'esplora behind the same URL still yields the full history');
     assert.ok(count(node, 'after_txid=') >= 1, 'the stale memo was tried first');
     assert.ok(count(node, '/txs/chain/') >= 1, 'then the other cursor took over');
+  });
+});
+
+test('a node that 404s every cursor is an error, not the end of the history', async () => {
+  const txs = history(12);
+  await withNode('both-404', txs, 10, async () => {
+    await assert.rejects(scriptTxsAll(SCRIPT), /No tx cursor style accepted/);
   });
 });

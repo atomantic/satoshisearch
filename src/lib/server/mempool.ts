@@ -176,13 +176,18 @@ async function nextTxPage(sh: string, lastTxid: string, seen: Map<string, Tx>): 
   const node = effectiveRuntime().mempoolApiUrl;
   const known = txCursorStyleByNode.get(node);
   const styles = known ? [known, ...TX_CURSOR_STYLES.filter((s) => s !== known)] : TX_CURSOR_STYLES;
+  let answered = false;
   for (const style of styles) {
     const page = await txPageAfter(sh, lastTxid, style);
     if (page === null) continue;
+    answered = true;
     if (page.length && page.every((tx) => seen.has(tx.txid))) continue;
     txCursorStyleByNode.set(node, style);
     return page;
   }
+  // A node that 404s every cursor is broken (reindexing, a flaky proxy), not
+  // finished: silently ending here would hide spends past page one again.
+  if (!answered) throw new Error(`No tx cursor style accepted by ${node} after ${lastTxid}`);
   return [];
 }
 
