@@ -65,6 +65,9 @@ console.log(
 
 export default defineConfig({
   plugins: [sveltekit()],
+  // Keep Svelte 4's SSR runtime intact. Rebundling its empty onMount function
+  // changes its formatting and breaks SvelteKit 2's legacy-runtime detection.
+  ssr: { external: ['svelte'] },
   server: {
     // Port comes from PORT (set by PM2 / ecosystem.config.cjs); 3117 standalone.
     port: Number(process.env.PORT) || 3117,
