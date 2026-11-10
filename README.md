@@ -47,6 +47,7 @@ npm run richlist:refresh      # fetch ≥1 BTC single-key richlist (loyce) + imp
 npm run rescue:check          # pre-flight for a realtime weak-key race
 npm run dev                   # http://localhost:3117
 npm test                      # unit tests (script/P2PK primitives)
+npm run test:production       # build + isolated production page/form smoke test
 ```
 
 Native tools need `cc`, `cmake`, `make`, and `git` once (clones libsecp256k1). Without them the
